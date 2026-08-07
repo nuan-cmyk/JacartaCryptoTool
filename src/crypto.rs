@@ -19,7 +19,7 @@ pub fn encrypt_file_with_key(
     master_key: &[u8],
 ) -> Result<(), Box<dyn Error>> {
     if master_key.len() != 32 {
-        return Err("Неверный размер мастер-ключа (требуется 32 байта)".into());
+        return Err("Invalid master key size (32 bytes required)".into());
     }
 
     // Read input file
@@ -55,7 +55,7 @@ pub fn decrypt_file_with_key(
     master_key: &[u8],
 ) -> Result<(), Box<dyn Error>> {
     if master_key.len() != 32 {
-        return Err("Неверный размер мастер-ключа (требуется 32 байта)".into());
+        return Err("Invalid master key size (32 bytes required)".into());
     }
 
     // Read input file
@@ -64,12 +64,12 @@ pub fn decrypt_file_with_key(
     // Parse header
     let header: EncryptedFileHeader = 
         bincode::deserialize(&input_data)
-        .map_err(|e| format!("Неверный формат файла: {:?}", e))?;
+        .map_err(|e| format!("Invalid file format: {:?}", e))?;
     
     let bytes_read = bincode::serialized_size(&header)? as usize;
 
     if header.magic != *MAGIC_BYTES {
-        return Err("Файл не является зашифрованным архивом JaCarta.".into());
+        return Err("File is not a JaCarta encrypted archive.".into());
     }
 
     let ciphertext = &input_data[bytes_read..];
@@ -91,16 +91,16 @@ pub fn decrypt_file_to_memory(
     master_key: &[u8],
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     if master_key.len() != 32 {
-        return Err("Неверный размер мастер-ключа (требуется 32 байта)".into());
+        return Err("Invalid master key size (32 bytes required)".into());
     }
 
     let input_data = fs::read(input_path)?;
     let header: EncryptedFileHeader = bincode::deserialize(&input_data)
-        .map_err(|e| format!("Неверный формат файла: {:?}", e))?;
+        .map_err(|e| format!("Invalid file format: {:?}", e))?;
     
     let bytes_read = bincode::serialized_size(&header)? as usize;
     if header.magic != *MAGIC_BYTES {
-        return Err("Файл не является зашифрованным архивом JaCarta.".into());
+        return Err("File is not a JaCarta encrypted archive.".into());
     }
 
     let ciphertext = &input_data[bytes_read..];

@@ -15,8 +15,8 @@ impl JacartaToken {
         Ok(Self { pkcs11 })
     }
 
-    /// Выполняет авторизованную операцию пользователя, перебирая все доступные слоты токена (Laser, Datastore, GOST).
-    /// Это гарантирует выбор правильного апплета, даже если в системе доступно несколько слотов.
+    /// Performs an authorized user operation by iterating through all available token slots (Laser, Datastore, GOST).
+    /// This ensures the correct applet is selected, even if multiple slots are available in the system.
     pub fn with_user_session<T>(
         &self,
         user_pin: &str,
@@ -24,7 +24,7 @@ impl JacartaToken {
     ) -> Result<T, Box<dyn Error>> {
         let slots = self.pkcs11.get_slots_with_token()?;
         if slots.is_empty() {
-            return Err("Токен не найден. Убедитесь, что JaCarta LT подключён.".into());
+            return Err("Token not found. Ensure the JaCarta LT is connected.".into());
         }
 
         let mut errors = Vec::new();
@@ -33,26 +33,26 @@ impl JacartaToken {
             let session = match self.pkcs11.open_rw_session(slot) {
                 Ok(s) => s,
                 Err(e) => {
-                    errors.push(format!("Слот {:?}: Ошибка открытия сессии {:?}", slot, e));
+                    errors.push(format!("Slot {:?}: Error opening session {:?}", slot, e));
                     continue;
                 }
             };
 
             if let Err(e) = session.login(UserType::User, Some(&AuthPin::new(user_pin.into()))) {
-                errors.push(format!("Слот {:?}: Ошибка авторизации ({:?})", slot, e));
+                errors.push(format!("Slot {:?}: Authorization error ({:?})", slot, e));
                 continue;
             }
 
-            // Авторизация прошла успешно! Выполняем требуемую операцию
+            // Authorization successful! Performing the requested operation
             let result = action(&session);
             let _ = session.logout();
             return result;
         }
 
-        Err(format!("Не удалось авторизоваться ни на одном из слотов токена. Ошибки: {}", errors.join("; ")).into())
+        Err(format!("Failed to authorize on any token slot. Errors: {}", errors.join("; ")).into())
     }
 
-    /// Смена User PIN.
+    /// Change User PIN.
     pub fn change_pin(&self, pin: &str, new_pin: &str, _is_admin: bool) -> Result<(), Box<dyn Error>> {
         self.with_user_session(pin, |session| {
             session.set_pin(&AuthPin::new(pin.into()), &AuthPin::new(new_pin.into()))?;
@@ -60,7 +60,7 @@ impl JacartaToken {
         })
     }
 
-    /// Получение или создание 256-битного мастер-ключа шифрования в защищённом хранилище Datastore на JaCarta LT.
+    /// Retrieving or creating a 256-bit encryption master key in the secure Datastore on JaCarta LT.
     pub fn get_or_create_master_key(&self, user_pin: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         self.with_user_session(user_pin, |session| {
             let key_id = vec![0x4A, 0x43, 0x52, 0x01]; // "JCR\x01"
@@ -72,7 +72,7 @@ impl JacartaToken {
 
             let objects = session.find_objects(&template)?;
             if !objects.is_empty() {
-                // Ключ найден — считываем его
+                // Key found - reading it
                 let attrs = session.get_attributes(objects[0], &[AttributeType::Value])?;
                 for attr in attrs {
                     if let Attribute::Value(val) = attr {
@@ -83,7 +83,7 @@ impl JacartaToken {
                 }
             }
 
-            // Ключ еще не создан — генерируем новый случайный AES-256 ключ
+            // Key not created yet - generating a new random AES-256 key
             let mut master_key = [0u8; 32];
             rand::fill(&mut master_key);
 

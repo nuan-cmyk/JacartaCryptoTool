@@ -96,7 +96,7 @@ impl eframe::App for JacartaApp {
                         self.is_processing = false;
                         keep_rx = false;
                         self.dropped_files.clear();
-                        self.action_status = Some((false, "Файл расшифрован в ОЗУ".to_string()));
+                        self.action_status = Some((false, "File decrypted in RAM".to_string()));
                         break;
                     }
                     WorkerMessage::Done(result) => {
@@ -149,7 +149,7 @@ impl eframe::App for JacartaApp {
             ui.horizontal(|ui| {
                 ui.heading(egui::RichText::new("🔐 JaCarta Crypto").size(24.0).strong().color(egui::Color32::from_rgb(90, 160, 255)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(if self.show_settings { "✕ Закрыть" } else { "⚙ Настройки" }).clicked() {
+                    if ui.button(if self.show_settings { "✕ Close" } else { "⚙ Settings" }).clicked() {
                         self.show_settings = !self.show_settings;
                         self.action_status = None;
                     }
@@ -160,8 +160,8 @@ impl eframe::App for JacartaApp {
             ui.add_space(10.0);
 
             if self.token.is_none() {
-                ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "Ошибка: Не удалось загрузить драйвер PKCS#11.");
-                ui.label("Убедитесь, что токен подключён, и перезапустите программу.");
+                ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "Error: Failed to load PKCS#11 driver.");
+                ui.label("Ensure the token is connected and restart the program.");
                 return;
             }
 
@@ -201,29 +201,29 @@ impl JacartaApp {
             ui.add_space(60.0);
             ui.label(egui::RichText::new("📂").size(60.0));
             ui.add_space(20.0);
-            ui.label(egui::RichText::new("Перетащите файлы сюда").size(20.0).strong());
+            ui.label(egui::RichText::new("Drag and drop files here").size(20.0).strong());
             ui.add_space(10.0);
-            ui.label(egui::RichText::new("Для автоматического шифрования или расшифрования").color(egui::Color32::GRAY));
+            ui.label(egui::RichText::new("For automatic encryption or decryption").color(egui::Color32::GRAY));
         });
     }
 
     fn show_settings_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.group(|ui| {
-                ui.label(egui::RichText::new("🔑 Инициализация мастер-ключа на токене").heading());
+                ui.label(egui::RichText::new("🔑 Token Master Key Initialization").heading());
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Создаёт 256-битный защищённый ключ. Необходим перед первым шифрованием.").color(egui::Color32::GRAY));
+                ui.label(egui::RichText::new("Creates a 256-bit secure key. Required before first encryption.").color(egui::Color32::GRAY));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.label("User PIN:");
                     ui.add(egui::TextEdit::singleline(&mut self.user_pin).password(true));
                 });
                 ui.add_space(8.0);
-                if ui.button("Создать мастер-ключ").clicked() {
+                if ui.button("Create Master Key").clicked() {
                     let token = self.token.as_ref().unwrap();
                     match token.get_or_create_master_key(&self.user_pin) {
-                        Ok(_) => self.action_status = Some((false, "✅ Мастер-ключ успешно создан!".to_string())),
-                        Err(e) => self.action_status = Some((true, format!("Ошибка доступа к токену: {}", e))),
+                        Ok(_) => self.action_status = Some((false, "✅ Master Key created successfully!".to_string())),
+                        Err(e) => self.action_status = Some((true, format!("Token access error: {}", e))),
                     }
                 }
             });
@@ -231,21 +231,21 @@ impl JacartaApp {
             ui.add_space(20.0);
 
             ui.group(|ui| {
-                ui.label(egui::RichText::new("🔄 Смена User PIN").heading());
+                ui.label(egui::RichText::new("🔄 Change User PIN").heading());
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.label("Текущий PIN:");
+                    ui.label("Current PIN:");
                     ui.add(egui::TextEdit::singleline(&mut self.user_pin).password(true));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Новый PIN:   ");
+                    ui.label("New PIN:   ");
                     ui.add(egui::TextEdit::singleline(&mut self.new_user_pin).password(true));
                 });
                 ui.add_space(8.0);
-                if ui.button("Сменить PIN").clicked() {
+                if ui.button("Change PIN").clicked() {
                     match self.token.as_ref().unwrap().change_pin(&self.user_pin, &self.new_user_pin, false) {
-                        Ok(_) => self.action_status = Some((false, "✅ User PIN успешно изменён.".to_string())),
-                        Err(e) => self.action_status = Some((true, format!("Ошибка смены PIN: {}", e))),
+                        Ok(_) => self.action_status = Some((false, "✅ User PIN changed successfully.".to_string())),
+                        Err(e) => self.action_status = Some((true, format!("PIN change error: {}", e))),
                     }
                 }
             });
@@ -255,7 +255,7 @@ impl JacartaApp {
     fn show_progress_panel(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.heading("⏳ Выполнение операции...");
+            ui.heading("⏳ Operation in progress...");
             ui.add_space(20.0);
             
             let progress_bar = egui::ProgressBar::new(self.progress)
@@ -264,7 +264,7 @@ impl JacartaApp {
             ui.add(progress_bar);
             
             ui.add_space(10.0);
-            ui.label(format!("Обработка: {}", self.current_file));
+            ui.label(format!("Processing: {}", self.current_file));
         });
     }
 
@@ -275,7 +275,7 @@ impl JacartaApp {
             ui.horizontal(|ui| {
                 ui.heading(egui::RichText::new(format!("👁 {}", file_name)).color(egui::Color32::from_rgb(255, 180, 50)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Закрыть и очистить память").clicked() {
+                    if ui.button("Close and clear memory").clicked() {
                         close_preview = true;
                     }
                 });
@@ -292,7 +292,7 @@ impl JacartaApp {
                             let mut text_buf = text.to_string();
                             ui.add(egui::TextEdit::multiline(&mut text_buf).desired_width(f32::INFINITY).interactive(false));
                         } else {
-                            ui.label(egui::RichText::new("Внимание: Это бинарный файл (не текст).").color(egui::Color32::from_rgb(255, 100, 100)));
+                            ui.label(egui::RichText::new("Warning: This is a binary file (not text).").color(egui::Color32::from_rgb(255, 100, 100)));
                             ui.add_space(5.0);
                             let hex: String = data.iter().take(1024).map(|b| format!("{:02X} ", b)).collect();
                             ui.label(egui::RichText::new(if data.len() > 1024 { format!("{}...", hex) } else { hex }).family(egui::FontFamily::Monospace).size(12.0));
@@ -318,7 +318,7 @@ impl JacartaApp {
         
         let auto_decrypt = crypt_count > (self.dropped_files.len() / 2);
 
-        ui.label(egui::RichText::new(format!("Выбрано файлов: {}", self.dropped_files.len())).strong());
+        ui.label(egui::RichText::new(format!("Selected files: {}", self.dropped_files.len())).strong());
         ui.add_space(5.0);
 
         egui::Frame::none()
@@ -329,7 +329,7 @@ impl JacartaApp {
                 let display_limit = 5;
                 for (i, f) in self.dropped_files.iter().enumerate() {
                     if i >= display_limit {
-                        ui.label(egui::RichText::new(format!("...и ещё {} файлов", self.dropped_files.len() - display_limit)).italics().color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new(format!("...and {} more files", self.dropped_files.len() - display_limit)).italics().color(egui::Color32::GRAY));
                         break;
                     }
                     ui.label(egui::RichText::new(format!("📄 {}", f.file_name().unwrap_or_default().to_string_lossy())).small());
@@ -339,7 +339,7 @@ impl JacartaApp {
         ui.add_space(10.0);
         
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Ваш PIN:").strong());
+            ui.label(egui::RichText::new("Your PIN:").strong());
             ui.add(egui::TextEdit::singleline(&mut self.user_pin).password(true).desired_width(150.0));
         });
 
@@ -347,23 +347,23 @@ impl JacartaApp {
 
         ui.horizontal(|ui| {
             if auto_decrypt {
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Расшифровать").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 200, 100))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Decrypt").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 200, 100))).clicked() {
                     self.start_processing(false, false);
                 }
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Зашифровать").size(16.0))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Encrypt").size(16.0))).clicked() {
                     self.start_processing(true, false);
                 }
             } else {
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Зашифровать").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 150, 255))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Encrypt").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 150, 255))).clicked() {
                     self.start_processing(true, false);
                 }
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Расшифровать").size(16.0))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Decrypt").size(16.0))).clicked() {
                     self.start_processing(false, false);
                 }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Отмена").clicked() {
+                if ui.button("Cancel").clicked() {
                     self.dropped_files.clear();
                     self.action_status = None;
                 }
@@ -372,7 +372,7 @@ impl JacartaApp {
         
         if auto_decrypt {
             ui.add_space(5.0);
-            if ui.button(egui::RichText::new("👁 Просмотр текста/кода без сохранения (только ОЗУ)").color(egui::Color32::from_rgb(255, 180, 50))).clicked() {
+            if ui.button(egui::RichText::new("👁 Preview text/code without saving (RAM only)").color(egui::Color32::from_rgb(255, 180, 50))).clicked() {
                 self.start_processing(false, true);
             }
         }
@@ -385,7 +385,7 @@ impl JacartaApp {
         let master_key = match token.get_or_create_master_key(&pin) {
             Ok(key) => key,
             Err(e) => {
-                self.action_status = Some((true, format!("Ошибка авторизации на токене: {}", e)));
+                self.action_status = Some((true, format!("Token authorization error: {}", e)));
                 return;
             }
         };
@@ -420,7 +420,7 @@ impl JacartaApp {
                             return; // Stop processing other files, just preview the first one
                         }
                         Err(e) => {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Ошибка расшифровки {}: {:?}", file.display(), e))));
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption error {}: {:?}", file.display(), e))));
                             return;
                         }
                     }
@@ -432,7 +432,7 @@ impl JacartaApp {
                         new_name.push(".crypt");
                         out_file.set_file_name(new_name);
                         if let Err(e) = crate::crypto::encrypt_file_with_key(file, &out_file, &master_key) {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Ошибка шифрования {}: {:?}", file.display(), e))));
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Encryption error {}: {:?}", file.display(), e))));
                             return;
                         }
                     } else {
@@ -445,15 +445,15 @@ impl JacartaApp {
                             out_file.set_file_name(new_name);
                         }
                         if let Err(e) = crate::crypto::decrypt_file_with_key(file, &out_file, &master_key) {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Ошибка расшифрования {}: {:?}", file.display(), e))));
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption error {}: {:?}", file.display(), e))));
                             return;
                         }
                     }
                 }
             }
             
-            let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: "Завершено".to_string() });
-            let _ = tx.send(WorkerMessage::Done(Ok("✅ Операция успешно завершена!".to_string())));
+            let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: "Completed".to_string() });
+            let _ = tx.send(WorkerMessage::Done(Ok("✅ Operation completed successfully!".to_string())));
         });
     }
 }
