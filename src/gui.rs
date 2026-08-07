@@ -1,0 +1,459 @@
+use eframe::egui;
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver};
+use std::thread;
+
+pub enum WorkerMessage {
+    Progress { current: usize, total: usize, current_file: String },
+    PreviewReady(String, Vec<u8>), // When previewing in RAM
+    Done(Result<String, String>),
+}
+
+pub struct JacartaApp {
+    pub dropped_files: Vec<PathBuf>,
+    pub user_pin: String,
+    pub new_user_pin: String,
+    pub action_status: Option<(bool, String)>, // (is_error, message)
+    pub token: Option<crate::pki::JacartaToken>,
+    pub show_settings: bool,
+
+    // Background processing
+    pub worker_rx: Option<Receiver<WorkerMessage>>,
+    pub is_processing: bool,
+    pub progress: f32,
+    pub current_file: String,
+    pub preview_data: Option<(String, Vec<u8>)>,
+}
+
+impl JacartaApp {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        setup_custom_styles(&_cc.egui_ctx);
+        
+        #[cfg(target_pointer_width = "64")]
+        let dll_bytes = include_bytes!("../drivers/jcPKCS11_2_Win64.dll");
+        #[cfg(target_pointer_width = "32")]
+        let dll_bytes = include_bytes!("../drivers/jcPKCS11_2_Win32.dll");
+
+        let dll_name = if cfg!(target_pointer_width = "64") {
+            "jcPKCS11_2_Win64_temp.dll"
+        } else {
+            "jcPKCS11_2_Win32_temp.dll"
+        };
+
+        let dll_path = std::env::temp_dir().join(dll_name);
+        let _ = std::fs::write(&dll_path, dll_bytes);
+
+        let token = crate::pki::JacartaToken::new(dll_path.to_str().unwrap()).ok();
+        Self {
+            dropped_files: Vec::new(),
+            user_pin: String::new(),
+            new_user_pin: String::new(),
+            action_status: None,
+            token,
+            show_settings: false,
+
+            worker_rx: None,
+            is_processing: false,
+            progress: 0.0,
+            current_file: String::new(),
+            preview_data: None,
+        }
+    }
+}
+
+fn setup_custom_styles(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    
+    style.visuals.window_fill = egui::Color32::from_rgb(25, 27, 33);
+    style.visuals.panel_fill = egui::Color32::from_rgb(25, 27, 33);
+    style.visuals.override_text_color = Some(egui::Color32::from_rgb(230, 230, 230));
+    
+    style.visuals.window_rounding = egui::Rounding::same(12.0);
+    style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+    style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+    style.visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+    style.visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+    
+    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+    style.spacing.button_padding = egui::vec2(12.0, 8.0);
+    
+    ctx.set_style(style);
+}
+
+impl eframe::App for JacartaApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle background messages
+        if let Some(rx) = self.worker_rx.take() {
+            let mut keep_rx = true;
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    WorkerMessage::Progress { current, total, current_file } => {
+                        self.progress = current as f32 / total as f32;
+                        self.current_file = current_file;
+                    }
+                    WorkerMessage::PreviewReady(file, data) => {
+                        self.preview_data = Some((file, data));
+                        self.is_processing = false;
+                        keep_rx = false;
+                        self.dropped_files.clear();
+                        self.action_status = Some((false, "Файл расшифрован в ОЗУ".to_string()));
+                        break;
+                    }
+                    WorkerMessage::Done(result) => {
+                        self.is_processing = false;
+                        keep_rx = false;
+                        self.dropped_files.clear();
+                        match result {
+                            Ok(msg) => self.action_status = Some((false, msg)),
+                            Err(err) => self.action_status = Some((true, err)),
+                        }
+                        break;
+                    }
+                }
+            }
+            if keep_rx {
+                self.worker_rx = Some(rx);
+            }
+            if self.is_processing {
+                ctx.request_repaint();
+            }
+        }
+
+        if !self.is_processing && self.preview_data.is_none() {
+            ctx.input(|i| {
+                if !i.raw.dropped_files.is_empty() {
+                    for file in &i.raw.dropped_files {
+                        if let Some(path) = &file.path {
+                            let mut stack = vec![path.clone()];
+                            while let Some(p) = stack.pop() {
+                                if p.is_file() {
+                                    if !self.dropped_files.contains(&p) {
+                                        self.dropped_files.push(p);
+                                    }
+                                } else if p.is_dir() {
+                                    if let Ok(entries) = std::fs::read_dir(p) {
+                                        for entry in entries.flatten() {
+                                            stack.push(entry.path());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // Header
+            ui.horizontal(|ui| {
+                ui.heading(egui::RichText::new("🔐 JaCarta Crypto").size(24.0).strong().color(egui::Color32::from_rgb(90, 160, 255)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(if self.show_settings { "✕ Закрыть" } else { "⚙ Настройки" }).clicked() {
+                        self.show_settings = !self.show_settings;
+                        self.action_status = None;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(10.0);
+
+            if self.token.is_none() {
+                ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "Ошибка: Не удалось загрузить драйвер PKCS#11.");
+                ui.label("Убедитесь, что токен подключён, и перезапустите программу.");
+                return;
+            }
+
+            if self.is_processing {
+                self.show_progress_panel(ui);
+            } else if self.preview_data.is_some() {
+                self.show_preview_panel(ui);
+            } else if self.show_settings {
+                self.show_settings_panel(ui);
+            } else if self.dropped_files.is_empty() {
+                self.show_idle_panel(ui);
+            } else {
+                self.show_encryption_panel(ui);
+            }
+
+            // Status bar at the bottom
+            if let Some((is_error, status)) = &self.action_status {
+                ui.add_space(15.0);
+                egui::Frame::none()
+                    .fill(if *is_error { egui::Color32::from_rgb(60, 20, 20) } else { egui::Color32::from_rgb(20, 60, 30) })
+                    .rounding(8.0)
+                    .inner_margin(12.0)
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            let color = if *is_error { egui::Color32::from_rgb(255, 120, 120) } else { egui::Color32::from_rgb(120, 255, 150) };
+                            ui.add(egui::Label::new(egui::RichText::new(status).color(color)).wrap());
+                        });
+                    });
+            }
+        });
+    }
+}
+
+impl JacartaApp {
+    fn show_idle_panel(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(60.0);
+            ui.label(egui::RichText::new("📂").size(60.0));
+            ui.add_space(20.0);
+            ui.label(egui::RichText::new("Перетащите файлы сюда").size(20.0).strong());
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("Для автоматического шифрования или расшифрования").color(egui::Color32::GRAY));
+        });
+    }
+
+    fn show_settings_panel(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("🔑 Инициализация мастер-ключа на токене").heading());
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Создаёт 256-битный защищённый ключ. Необходим перед первым шифрованием.").color(egui::Color32::GRAY));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("User PIN:");
+                    ui.add(egui::TextEdit::singleline(&mut self.user_pin).password(true));
+                });
+                ui.add_space(8.0);
+                if ui.button("Создать мастер-ключ").clicked() {
+                    let token = self.token.as_ref().unwrap();
+                    match token.get_or_create_master_key(&self.user_pin) {
+                        Ok(_) => self.action_status = Some((false, "✅ Мастер-ключ успешно создан!".to_string())),
+                        Err(e) => self.action_status = Some((true, format!("Ошибка доступа к токену: {}", e))),
+                    }
+                }
+            });
+
+            ui.add_space(20.0);
+
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("🔄 Смена User PIN").heading());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Текущий PIN:");
+                    ui.add(egui::TextEdit::singleline(&mut self.user_pin).password(true));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Новый PIN:   ");
+                    ui.add(egui::TextEdit::singleline(&mut self.new_user_pin).password(true));
+                });
+                ui.add_space(8.0);
+                if ui.button("Сменить PIN").clicked() {
+                    match self.token.as_ref().unwrap().change_pin(&self.user_pin, &self.new_user_pin, false) {
+                        Ok(_) => self.action_status = Some((false, "✅ User PIN успешно изменён.".to_string())),
+                        Err(e) => self.action_status = Some((true, format!("Ошибка смены PIN: {}", e))),
+                    }
+                }
+            });
+        });
+    }
+
+    fn show_progress_panel(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(60.0);
+            ui.heading("⏳ Выполнение операции...");
+            ui.add_space(20.0);
+            
+            let progress_bar = egui::ProgressBar::new(self.progress)
+                .show_percentage()
+                .animate(true);
+            ui.add(progress_bar);
+            
+            ui.add_space(10.0);
+            ui.label(format!("Обработка: {}", self.current_file));
+        });
+    }
+
+    fn show_preview_panel(&mut self, ui: &mut egui::Ui) {
+        let mut close_preview = false;
+        
+        if let Some((file_name, data)) = &self.preview_data {
+            ui.horizontal(|ui| {
+                ui.heading(egui::RichText::new(format!("👁 {}", file_name)).color(egui::Color32::from_rgb(255, 180, 50)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Закрыть и очистить память").clicked() {
+                        close_preview = true;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(15, 15, 15))
+                .rounding(6.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
+                        if let Ok(text) = std::str::from_utf8(data) {
+                            let mut text_buf = text.to_string();
+                            ui.add(egui::TextEdit::multiline(&mut text_buf).desired_width(f32::INFINITY).interactive(false));
+                        } else {
+                            ui.label(egui::RichText::new("Внимание: Это бинарный файл (не текст).").color(egui::Color32::from_rgb(255, 100, 100)));
+                            ui.add_space(5.0);
+                            let hex: String = data.iter().take(1024).map(|b| format!("{:02X} ", b)).collect();
+                            ui.label(egui::RichText::new(if data.len() > 1024 { format!("{}...", hex) } else { hex }).family(egui::FontFamily::Monospace).size(12.0));
+                        }
+                    });
+                });
+        }
+        
+        if close_preview {
+            self.preview_data = None;
+        }
+    }
+
+    fn show_encryption_panel(&mut self, ui: &mut egui::Ui) {
+        let mut crypt_count = 0;
+        for f in &self.dropped_files {
+            if let Some(ext) = f.extension() {
+                if ext == "crypt" {
+                    crypt_count += 1;
+                }
+            }
+        }
+        
+        let auto_decrypt = crypt_count > (self.dropped_files.len() / 2);
+
+        ui.label(egui::RichText::new(format!("Выбрано файлов: {}", self.dropped_files.len())).strong());
+        ui.add_space(5.0);
+
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(35, 38, 45))
+            .rounding(6.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                let display_limit = 5;
+                for (i, f) in self.dropped_files.iter().enumerate() {
+                    if i >= display_limit {
+                        ui.label(egui::RichText::new(format!("...и ещё {} файлов", self.dropped_files.len() - display_limit)).italics().color(egui::Color32::GRAY));
+                        break;
+                    }
+                    ui.label(egui::RichText::new(format!("📄 {}", f.file_name().unwrap_or_default().to_string_lossy())).small());
+                }
+            });
+
+        ui.add_space(10.0);
+        
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Ваш PIN:").strong());
+            ui.add(egui::TextEdit::singleline(&mut self.user_pin).password(true).desired_width(150.0));
+        });
+
+        ui.add_space(15.0);
+
+        ui.horizontal(|ui| {
+            if auto_decrypt {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Расшифровать").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 200, 100))).clicked() {
+                    self.start_processing(false, false);
+                }
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Зашифровать").size(16.0))).clicked() {
+                    self.start_processing(true, false);
+                }
+            } else {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Зашифровать").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 150, 255))).clicked() {
+                    self.start_processing(true, false);
+                }
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Расшифровать").size(16.0))).clicked() {
+                    self.start_processing(false, false);
+                }
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Отмена").clicked() {
+                    self.dropped_files.clear();
+                    self.action_status = None;
+                }
+            });
+        });
+        
+        if auto_decrypt {
+            ui.add_space(5.0);
+            if ui.button(egui::RichText::new("👁 Просмотр текста/кода без сохранения (только ОЗУ)").color(egui::Color32::from_rgb(255, 180, 50))).clicked() {
+                self.start_processing(false, true);
+            }
+        }
+    }
+
+    fn start_processing(&mut self, encrypt: bool, preview_only: bool) {
+        let token = self.token.as_ref().unwrap();
+        let pin = self.user_pin.clone();
+
+        let master_key = match token.get_or_create_master_key(&pin) {
+            Ok(key) => key,
+            Err(e) => {
+                self.action_status = Some((true, format!("Ошибка авторизации на токене: {}", e)));
+                return;
+            }
+        };
+
+        let files = self.dropped_files.clone();
+        let (tx, rx) = channel();
+        self.worker_rx = Some(rx);
+        self.is_processing = true;
+        self.progress = 0.0;
+        self.action_status = None;
+
+        thread::spawn(move || {
+            let total = files.len();
+            for (i, file) in files.iter().enumerate() {
+                let file_name_lossy = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                
+                let _ = tx.send(WorkerMessage::Progress {
+                    current: i,
+                    total,
+                    current_file: file_name_lossy.clone(),
+                });
+
+                if preview_only {
+                    let mut temp_name = file_name_lossy.clone();
+                    if temp_name.ends_with(".crypt") {
+                        temp_name = temp_name[..temp_name.len() - 6].to_string();
+                    }
+                    
+                    match crate::crypto::decrypt_file_to_memory(file, &master_key) {
+                        Ok(data) => {
+                            let _ = tx.send(WorkerMessage::PreviewReady(temp_name, data));
+                            return; // Stop processing other files, just preview the first one
+                        }
+                        Err(e) => {
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Ошибка расшифровки {}: {:?}", file.display(), e))));
+                            return;
+                        }
+                    }
+                } else {
+                    let mut out_file = file.clone();
+
+                    if encrypt {
+                        let mut new_name = file.file_name().unwrap_or_default().to_os_string();
+                        new_name.push(".crypt");
+                        out_file.set_file_name(new_name);
+                        if let Err(e) = crate::crypto::encrypt_file_with_key(file, &out_file, &master_key) {
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Ошибка шифрования {}: {:?}", file.display(), e))));
+                            return;
+                        }
+                    } else {
+                        let file_name = file.file_name().unwrap_or_default().to_string_lossy();
+                        if file_name.ends_with(".crypt") {
+                            out_file.set_file_name(&file_name[..file_name.len() - 6]);
+                        } else {
+                            let mut new_name = file.file_name().unwrap_or_default().to_os_string();
+                            new_name.push(".decrypted");
+                            out_file.set_file_name(new_name);
+                        }
+                        if let Err(e) = crate::crypto::decrypt_file_with_key(file, &out_file, &master_key) {
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Ошибка расшифрования {}: {:?}", file.display(), e))));
+                            return;
+                        }
+                    }
+                }
+            }
+            
+            let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: "Завершено".to_string() });
+            let _ = tx.send(WorkerMessage::Done(Ok("✅ Операция успешно завершена!".to_string())));
+        });
+    }
+}
