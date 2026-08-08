@@ -1,49 +1,48 @@
-# JacartaCryptoTool
+# JaCarta Crypto Tool
 
-JacartaCryptoTool is a secure, hardware-backed file encryption utility designed for use with JaCarta PKCS#11 hardware tokens. It provides a modern, fast, and secure graphical user interface for encrypting and decrypting files using AES-256-GCM, with cryptographic keys securely derived and managed within the hardware token.
+JaCarta Crypto Tool is a secure file and directory encryption utility that leverages JaCarta PKCS#11 hardware tokens for cryptographic key derivation and authentication. It features a zero-disk streaming architecture, robust memory zeroization, and active anti-analysis protections.
 
-## Features
+## Key Features
 
-* **Hardware-Backed Security:** Leverages JaCarta PKCS#11 tokens for Master Key generation and secure PIN authentication.
-* **Strong Encryption:** Uses authenticated AES-256-GCM for all file encryption operations.
-* **In-Memory Secure Preview:** Safely decrypt and preview files (text or hex dump) directly in RAM without ever writing decrypted data to the disk.
-* **Modern GUI:** Built with Rust and `egui` for a responsive, lightweight, and professional dark-themed user interface.
-* **Batch Processing:** Supports drag-and-drop for multiple files and recursive directory traversal for bulk encryption.
-* **Asynchronous Operations:** Heavy cryptographic operations are processed in a background thread, preventing UI freezes and providing real-time progress updates.
+* **Hardware-Backed Key Derivation**: Integrates with JaCarta hardware tokens via PKCS#11 for secure PIN verification and master key derivation.
+* **Stream AEAD Encryption**: Utilizes AES-256-GCM in streaming mode with 64 KB chunks.
+* **Metadata Integrity Protection**: Uses Additional Authenticated Data (AAD) to bind the file headers (magic bytes and nonce base) to the authentication tag of each encrypted chunk, mitigating metadata tampering.
+* **Zero-Disk Tar Streaming**: Packages directories and multiple files into a tar stream in memory and encrypts it on the fly. Plaintext files never touch physical storage during encryption or decryption.
+* **Secure File Shredding**: Implements a multi-pass secure file wiper that overwrites original files with random data before deletion.
+* **Anti-Screenshot Mitigation**: Restricts the application window from being captured by screen recorders, capture software, or OS-level screenshot API hooks (using `SetWindowDisplayAffinity`).
+* **Anti-Debugging Shield**: Periodically queries the OS process environment block (`IsDebuggerPresent`) to instantly terminate execution if analysis tools are attached.
+* **In-Memory Secure Preview**: Allows viewing the contents of encrypted files in a secure memory buffer without writing decrypted files to disk.
+
+## Security Architecture
+
+1. **Memory Security**: All sensitive cryptographic material, including the master key and user PIN, are wrapped in `zeroize` and `secrecy` wrappers to prevent memory leaks and dump exposure.
+2. **Backward Compatibility**: Fully supports decryption of legacy archive versions (`JACARTA1` and `JACARTA2`) while writing new archives in the authenticated `JACARTA3` format.
+3. **Threading Model**: Separation of UI thread (built with `egui` and `glow`) and the heavy cryptographic execution thread, synchronized using lock-free `mpsc` channels.
+
+## Platform Compatibility
+
+The application is configured to build and run on:
+* **Windows** (x86_64, AArch64) - full feature set, including anti-debugging and anti-screenshot hooks.
+* **Linux** (x86_64, AArch64) - encryption and archiving core.
+* **macOS** (x86_64, AArch64) - encryption and archiving core.
+
+*Note: Windows-specific security APIs (such as `windows-sys` and associated kernel hooks) are conditionally compiled and active only on Windows hosts.*
 
 ## Requirements
 
-* Windows OS (64-bit or 32-bit).
-* A supported JaCarta hardware token connected via USB.
-* Appropriate JaCarta PKCS#11 drivers (`jcPKCS11_2_Win64.dll` / `jcPKCS11_2_Win32.dll`) available in the system or bundled with the build.
+* Rust toolchain (2021 edition or later).
+* A supported JaCarta USB hardware token and PKCS#11 drivers (`jcPKCS11_2_Win64.dll` / `jcPKCS11_2_Win32.dll` on Windows) configured in the system library path.
 
-## Installation and Build
+## Build and Run
 
-This project is written in Rust. You will need `cargo` and `rustc` installed.
+To build the release binary locally:
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-username/JacartaCryptoTool.git
-   cd JacartaCryptoTool
-   ```
-2. Build the release version:
-   ```bash
-   cargo build --release
-   ```
-3. Run the executable located in `target/release/jacarta.exe`.
+```bash
+cargo build --release
+```
 
-## Usage
+The compiled binary will be placed in the `target/release/` directory.
 
-1. Launch the application.
-2. Drag and drop files or directories into the main window.
-3. Enter your JaCarta User PIN.
-4. Click "Encrypt" or "Decrypt". 
-5. For in-memory reading of encrypted files without leaving a trace on the disk, use the "Preview in RAM" button.
+## Automated Builds
 
-## Architecture
-
-The application strictly separates the UI thread (`egui`) from the cryptographic workload. Background processing is handled via standard Rust threads and `mpsc` channels to report progress back to the UI. Key derivation uses PBKDF2-HMAC-SHA256, and file data is processed using `aes-gcm`.
-
-## License
-
-This project is licensed under the MIT License.
+The repository includes a GitHub Actions workflow that automatically builds release binaries for all target architectures (Windows, Linux, macOS) upon tag pushes (matching `v*`) or manual workflow triggers.
