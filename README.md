@@ -43,6 +43,3 @@ cargo build --release
 
 The compiled binary will be placed in the `target/release/` directory.
 
-## Automated Builds
-
-The repository includes a GitHub Actions workflow that automatically builds release binaries for all target architectures (Windows, Linux, macOS) upon tag pushes (matching `v*`) or manual workflow triggers.
