@@ -164,6 +164,7 @@ pub struct DecryptStream<R: Read> {
     buffer_pos: usize,
     is_v3: bool,
     is_last_chunk_reached: bool,
+    is_legacy_v3: bool, // Support for files encrypted in v1.1.0 - v1.1.4
 }
 
 impl<R: Read> DecryptStream<R> {
@@ -202,6 +203,7 @@ impl<R: Read> DecryptStream<R> {
                 buffer_pos: 0,
                 is_v3: false,
                 is_last_chunk_reached: true,
+                is_legacy_v3: false,
             });
         }
 
@@ -222,14 +224,15 @@ impl<R: Read> DecryptStream<R> {
             buffer_pos: 0,
             is_v3,
             is_last_chunk_reached: false,
+            is_legacy_v3: false,
         })
     }
     
     fn read_next_chunk(&mut self) -> std::io::Result<()> {
-        if !self.is_v3 && self.total_read >= self.file_size {
-            return Ok(()); // Legacy EOF
+        if (!self.is_v3 || self.is_legacy_v3) && self.total_read >= self.file_size {
+            return Ok(()); // Legacy/Legacy-V3 EOF
         }
-        if self.is_v3 && self.is_last_chunk_reached {
+        if self.is_v3 && !self.is_legacy_v3 && self.is_last_chunk_reached {
             return Ok(()); // V3 EOF
         }
         if self.chunk_index >= 0xFFFF_FFFF {
@@ -252,6 +255,36 @@ impl<R: Read> DecryptStream<R> {
             let nonce = Nonce::from(chunk_nonce_bytes);
             
             let mut plaintext = self.cipher.decrypt(&nonce, chunk_data.as_ref())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed: {:?}", e)))?;
+                
+            self.buffer = plaintext.clone();
+            self.buffer_pos = 0;
+            self.total_read += plaintext.len() as u64;
+            self.chunk_index += 1;
+            plaintext.zeroize();
+            Ok(())
+        } else if self.is_legacy_v3 {
+            // Decrypt legacy V3 chunk (without is_last flag in AAD)
+            let remaining = self.file_size - self.total_read;
+            let expected_plaintext_size = std::cmp::min(remaining, CHUNK_SIZE as u64) as usize;
+            let expected_ciphertext_size = expected_plaintext_size + 16;
+            
+            let mut chunk_data = vec![0u8; expected_ciphertext_size];
+            self.reader.read_exact(&mut chunk_data)?;
+            
+            let chunk_nonce_bytes = get_chunk_nonce(&self.nonce_base, self.chunk_index);
+            let nonce = Nonce::from(chunk_nonce_bytes);
+            
+            let mut aad = Vec::new();
+            aad.extend_from_slice(MAGIC_BYTES_V3);
+            aad.extend_from_slice(&self.nonce_base);
+            
+            let payload = Payload {
+                msg: &chunk_data,
+                aad: &aad,
+            };
+            
+            let mut plaintext = self.cipher.decrypt(&nonce, payload)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed: {:?}", e)))?;
                 
             self.buffer = plaintext.clone();
@@ -322,11 +355,30 @@ impl<R: Read> DecryptStream<R> {
                         aad: &aad,
                     };
                     
-                    let pt = self.cipher.decrypt(&nonce, payload)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed or chunk was truncated: {:?}", e)))?;
-                    
-                    self.is_last_chunk_reached = true;
-                    pt
+                    if let Ok(pt) = self.cipher.decrypt(&nonce, payload) {
+                        self.is_last_chunk_reached = true;
+                        pt
+                    } else {
+                        // Fallback: Check if this is a legacy V3 file encrypted without is_last flag in AAD
+                        let mut legacy_aad = Vec::new();
+                        legacy_aad.extend_from_slice(MAGIC_BYTES_V3);
+                        legacy_aad.extend_from_slice(&self.nonce_base);
+                        
+                        let legacy_payload = Payload {
+                            msg: &chunk_data,
+                            aad: &legacy_aad,
+                        };
+                        
+                        if let Ok(pt) = self.cipher.decrypt(&nonce, legacy_payload) {
+                            self.is_legacy_v3 = true;
+                            pt
+                        } else {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "AES Decryption failed or chunk was truncated: Error"
+                            ));
+                        }
+                    }
                 }
             };
 
@@ -408,3 +460,87 @@ pub fn decrypt_file_to_memory(
     stream.read_to_end(&mut buf)?;
     Ok(Zeroizing::new(buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_streaming_encrypt_decrypt() {
+        let key = b"0123456789abcdef0123456789abcdef"; // 32 bytes key
+        let original_data = vec![65u8; 150000]; // 150 KB (spans multiple 64KB chunks)
+
+        // Encrypt
+        let mut encrypted_buffer = Cursor::new(Vec::new());
+        {
+            let mut encryptor = EncryptStream::new(&mut encrypted_buffer, key).unwrap();
+            encryptor.write_all(&original_data).unwrap();
+            encryptor.finish().unwrap();
+        }
+
+        // Decrypt
+        encrypted_buffer.seek(SeekFrom::Start(0)).unwrap();
+        let mut decrypted_data = Vec::new();
+        {
+            let mut decryptor = DecryptStream::new(&mut encrypted_buffer, key).unwrap();
+            decryptor.read_to_end(&mut decrypted_data).unwrap();
+        }
+
+        assert_eq!(original_data, decrypted_data);
+    }
+
+    #[test]
+    fn test_legacy_v3_fallback() {
+        let key = b"0123456789abcdef0123456789abcdef";
+        let original_data = vec![66u8; 150000];
+
+        // Simulate legacy V3 encryption (without is_last flag in AAD)
+        let mut encrypted_buffer = Cursor::new(Vec::new());
+        {
+            let mut nonce_base = [0u8; 12];
+            rand::fill(&mut nonce_base);
+            
+            let header_body = EncryptedFileHeaderBody {
+                nonce_base,
+                file_size: original_data.len() as u64,
+            };
+            encrypted_buffer.write_all(MAGIC_BYTES_V3).unwrap();
+            let header_bytes = bincode::serialize(&header_body).unwrap();
+            encrypted_buffer.write_all(&header_bytes).unwrap();
+            
+            // Encrypt in chunks
+            let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from_slice(key));
+            let mut chunk_index = 0;
+            for chunk in original_data.chunks(CHUNK_SIZE) {
+                let chunk_nonce_bytes = get_chunk_nonce(&nonce_base, chunk_index);
+                let nonce = Nonce::from(chunk_nonce_bytes);
+                
+                let mut aad = Vec::new();
+                aad.extend_from_slice(MAGIC_BYTES_V3);
+                aad.extend_from_slice(&nonce_base);
+                // Note: NO is_last flag pushed!
+                
+                let payload = Payload {
+                    msg: chunk,
+                    aad: &aad,
+                };
+                let ciphertext = cipher.encrypt(&nonce, payload).unwrap();
+                encrypted_buffer.write_all(&ciphertext).unwrap();
+                chunk_index += 1;
+            }
+        }
+
+        // Decrypt using the new DecryptStream (should trigger fallback)
+        encrypted_buffer.seek(SeekFrom::Start(0)).unwrap();
+        let mut decrypted_data = Vec::new();
+        {
+            let mut decryptor = DecryptStream::new(&mut encrypted_buffer, key).unwrap();
+            decryptor.read_to_end(&mut decrypted_data).unwrap();
+            assert!(decryptor.is_legacy_v3); // Verify that fallback was successfully detected
+        }
+
+        assert_eq!(original_data, decrypted_data);
+    }
+}
+
