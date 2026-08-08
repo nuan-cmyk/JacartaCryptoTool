@@ -13,6 +13,7 @@ pub struct JacartaApp {
     pub dropped_files: Vec<PathBuf>,
     pub user_pin: String,
     pub new_user_pin: String,
+    pub delete_originals: bool,
     pub action_status: Option<(bool, String)>, // (is_error, message)
     pub token: Option<crate::pki::JacartaToken>,
     pub show_settings: bool,
@@ -46,6 +47,7 @@ impl JacartaApp {
         let token = crate::pki::JacartaToken::new(dll_path.to_str().unwrap()).ok();
         Self {
             dropped_files: Vec::new(),
+            delete_originals: false,
             user_pin: String::new(),
             new_user_pin: String::new(),
             action_status: None,
@@ -124,19 +126,8 @@ impl eframe::App for JacartaApp {
                 if !i.raw.dropped_files.is_empty() {
                     for file in &i.raw.dropped_files {
                         if let Some(path) = &file.path {
-                            let mut stack = vec![path.clone()];
-                            while let Some(p) = stack.pop() {
-                                if p.is_file() {
-                                    if !self.dropped_files.contains(&p) {
-                                        self.dropped_files.push(p);
-                                    }
-                                } else if p.is_dir() {
-                                    if let Ok(entries) = std::fs::read_dir(p) {
-                                        for entry in entries.flatten() {
-                                            stack.push(entry.path());
-                                        }
-                                    }
-                                }
+                            if !self.dropped_files.contains(path) {
+                                self.dropped_files.push(path.clone());
                             }
                         }
                     }
@@ -343,6 +334,9 @@ impl JacartaApp {
             ui.add(egui::TextEdit::singleline(&mut self.user_pin).password(true).desired_width(150.0));
         });
 
+        ui.add_space(5.0);
+        ui.checkbox(&mut self.delete_originals, "🗑 Delete originals after successful operation");
+
         ui.add_space(15.0);
 
         ui.horizontal(|ui| {
@@ -397,57 +391,163 @@ impl JacartaApp {
         self.progress = 0.0;
         self.action_status = None;
 
+        let delete_originals = self.delete_originals;
+
         thread::spawn(move || {
             let total = files.len();
-            for (i, file) in files.iter().enumerate() {
-                let file_name_lossy = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if total == 0 {
+                let _ = tx.send(WorkerMessage::Done(Ok("Nothing to process".to_string())));
+                return;
+            }
+
+            if preview_only {
+                let input_path = &files[0];
+                let mut temp_name = input_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                if temp_name.ends_with(".crypt") {
+                    temp_name = temp_name[..temp_name.len() - 6].to_string();
+                }
                 
-                let _ = tx.send(WorkerMessage::Progress {
-                    current: i,
-                    total,
-                    current_file: file_name_lossy.clone(),
-                });
-
-                if preview_only {
-                    let mut temp_name = file_name_lossy.clone();
-                    if temp_name.ends_with(".crypt") {
-                        temp_name = temp_name[..temp_name.len() - 6].to_string();
-                    }
-                    
-                    match crate::crypto::decrypt_file_to_memory(file, &master_key) {
-                        Ok(data) => {
-                            let _ = tx.send(WorkerMessage::PreviewReady(temp_name, data));
-                            return; // Stop processing other files, just preview the first one
+                match crate::crypto::decrypt_file_to_memory(input_path, &master_key) {
+                    Ok(data) => {
+                        use std::io::Cursor;
+                        let mut archive = tar::Archive::new(Cursor::new(data));
+                        let mut preview_text = String::new();
+                        
+                        if let Ok(entries) = archive.entries() {
+                            for entry in entries {
+                                if let Ok(mut file) = entry {
+                                    let path = file.path().unwrap().to_string_lossy().into_owned();
+                                    preview_text.push_str(&format!("--- FILE: {} ---\n", path));
+                                    if file.header().entry_type().is_file() {
+                                        let mut content = Vec::new();
+                                        if std::io::Read::read_to_end(&mut file, &mut content).is_ok() {
+                                            if let Ok(s) = std::str::from_utf8(&content) {
+                                                preview_text.push_str(s);
+                                            } else {
+                                                preview_text.push_str("[BINARY DATA]\n");
+                                            }
+                                        }
+                                    }
+                                    preview_text.push_str("\n\n");
+                                }
+                            }
+                            let _ = tx.send(WorkerMessage::PreviewReady("Archive Preview".to_string(), preview_text.into_bytes()));
+                        } else {
+                            let _ = tx.send(WorkerMessage::Done(Err("Failed to parse archive in RAM".to_string())));
                         }
-                        Err(e) => {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption error {}: {:?}", file.display(), e))));
-                            return;
-                        }
                     }
-                } else {
-                    let mut out_file = file.clone();
+                    Err(e) => {
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption error {}: {:?}", input_path.display(), e))));
+                    }
+                }
+                return;
+            }
 
-                    if encrypt {
-                        let mut new_name = file.file_name().unwrap_or_default().to_os_string();
-                        new_name.push(".crypt");
-                        out_file.set_file_name(new_name);
-                        if let Err(e) = crate::crypto::encrypt_file_with_key(file, &out_file, &master_key) {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Encryption error {}: {:?}", file.display(), e))));
+            if encrypt {
+                let _ = tx.send(WorkerMessage::Progress { current: 0, total, current_file: "Creating archive...".to_string() });
+                
+                let first_path = &files[0];
+                let mut output_path = first_path.clone();
+                let original_name = first_path.file_name().unwrap().to_string_lossy().into_owned();
+                output_path.set_file_name(format!("{}.crypt", original_name));
+
+                let temp_tar_path = std::env::temp_dir().join(format!("jacarta_{}.tar", std::process::id()));
+                let tar_file = match std::fs::File::create(&temp_tar_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Error creating temp tar: {:?}", e))));
+                        return;
+                    }
+                };
+                let mut builder = tar::Builder::new(tar_file);
+
+                for (i, path) in files.iter().enumerate() {
+                    let _ = tx.send(WorkerMessage::Progress { current: i, total, current_file: format!("Packing {}", path.display()) });
+                    let name = path.file_name().unwrap();
+                    if path.is_dir() {
+                        if let Err(e) = builder.append_dir_all(name, path) {
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Error packing dir {}: {:?}", path.display(), e))));
+                            let _ = std::fs::remove_file(&temp_tar_path);
                             return;
                         }
                     } else {
-                        let file_name = file.file_name().unwrap_or_default().to_string_lossy();
-                        if file_name.ends_with(".crypt") {
-                            out_file.set_file_name(&file_name[..file_name.len() - 6]);
-                        } else {
-                            let mut new_name = file.file_name().unwrap_or_default().to_os_string();
-                            new_name.push(".decrypted");
-                            out_file.set_file_name(new_name);
-                        }
-                        if let Err(e) = crate::crypto::decrypt_file_with_key(file, &out_file, &master_key) {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption error {}: {:?}", file.display(), e))));
+                        if let Err(e) = builder.append_path_with_name(path, name) {
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Error packing file {}: {:?}", path.display(), e))));
+                            let _ = std::fs::remove_file(&temp_tar_path);
                             return;
                         }
+                    }
+                }
+                
+                if let Err(e) = builder.finish() {
+                    let _ = tx.send(WorkerMessage::Done(Err(format!("Error finalizing tar: {:?}", e))));
+                    let _ = std::fs::remove_file(&temp_tar_path);
+                    return;
+                }
+
+                let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: "Encrypting archive...".to_string() });
+                match crate::crypto::encrypt_file_with_key(&temp_tar_path, &output_path, &master_key) {
+                    Ok(_) => {
+                        let _ = std::fs::remove_file(&temp_tar_path);
+                        if delete_originals {
+                            for path in &files {
+                                let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: format!("Deleting {}", path.display()) });
+                                if path.is_dir() {
+                                    let _ = std::fs::remove_dir_all(path);
+                                } else {
+                                    let _ = std::fs::remove_file(path);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&temp_tar_path);
+                        let _ = std::fs::remove_file(&output_path);
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Encryption error: {:?}", e))));
+                        return;
+                    }
+                }
+            } else {
+                let input_path = &files[0];
+                if input_path.extension().unwrap_or_default() != "crypt" {
+                    let _ = tx.send(WorkerMessage::Done(Err("Selected file is not a .crypt archive.".to_string())));
+                    return;
+                }
+
+                let _ = tx.send(WorkerMessage::Progress { current: 0, total: 1, current_file: "Decrypting archive...".to_string() });
+                let temp_tar_path = std::env::temp_dir().join(format!("jacarta_dec_{}.tar", std::process::id()));
+
+                match crate::crypto::decrypt_file_with_key(input_path, &temp_tar_path, &master_key) {
+                    Ok(_) => {
+                        let _ = tx.send(WorkerMessage::Progress { current: 1, total: 1, current_file: "Unpacking archive...".to_string() });
+                        
+                        let tar_file = match std::fs::File::open(&temp_tar_path) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                let _ = std::fs::remove_file(&temp_tar_path);
+                                let _ = tx.send(WorkerMessage::Done(Err(format!("Error opening temp tar: {:?}", e))));
+                                return;
+                            }
+                        };
+                        
+                        let mut archive = tar::Archive::new(tar_file);
+                        let parent_dir = input_path.parent().unwrap();
+                        
+                        if let Err(e) = archive.unpack(parent_dir) {
+                            let _ = std::fs::remove_file(&temp_tar_path);
+                            let _ = tx.send(WorkerMessage::Done(Err(format!("Error unpacking archive: {:?}", e))));
+                            return;
+                        }
+                        
+                        let _ = std::fs::remove_file(&temp_tar_path);
+                        if delete_originals {
+                            let _ = std::fs::remove_file(input_path);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&temp_tar_path);
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption error: {:?}", e))));
+                        return;
                     }
                 }
             }

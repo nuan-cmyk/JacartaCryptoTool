@@ -13,3 +13,4 @@ rand = "0.10.2"
 rsa = "0.9.10"
 serde = { version = "1.0.229", features = ["derive"] }
 spki = "0.8.0"
+tar = "0.4"
