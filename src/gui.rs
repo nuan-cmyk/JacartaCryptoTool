@@ -2,10 +2,11 @@ use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
+use zeroize::{Zeroize, Zeroizing};
 
 pub enum WorkerMessage {
     Progress { current: usize, total: usize, current_file: String },
-    PreviewReady(String, Vec<u8>), // When previewing in RAM
+    PreviewReady(String, Zeroizing<Vec<u8>>), // When previewing in RAM
     Done(Result<String, String>),
 }
 
@@ -23,7 +24,8 @@ pub struct JacartaApp {
     pub is_processing: bool,
     pub progress: f32,
     pub current_file: String,
-    pub preview_data: Option<(String, Vec<u8>)>,
+    pub preview_data: Option<(String, Zeroizing<Vec<u8>>)>,
+    pub security_applied: bool,
 }
 
 impl JacartaApp {
@@ -59,6 +61,7 @@ impl JacartaApp {
             progress: 0.0,
             current_file: String::new(),
             preview_data: None,
+            security_applied: false,
         }
     }
 }
@@ -84,6 +87,29 @@ fn setup_custom_styles(ctx: &egui::Context) {
 
 impl eframe::App for JacartaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        unsafe {
+            if windows_sys::Win32::System::Diagnostics::Debug::IsDebuggerPresent() != 0 {
+                std::process::exit(1);
+            }
+        }
+
+        if !self.security_applied {
+            unsafe extern "system" fn enum_window_callback(hwnd: windows_sys::Win32::Foundation::HWND, _lparam: isize) -> i32 {
+                let mut pid = 0;
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, &mut pid);
+                    if pid == std::process::id() as u32 {
+                        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowDisplayAffinity(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::WDA_EXCLUDEFROMCAPTURE);
+                    }
+                }
+                1
+            }
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows(Some(enum_window_callback), 0);
+            }
+            self.security_applied = true;
+        }
+
         // Handle background messages
         if let Some(rx) = self.worker_rx.take() {
             let mut keep_rx = true;
@@ -138,9 +164,9 @@ impl eframe::App for JacartaApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Header
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new("🔐 JaCarta Crypto").size(24.0).strong().color(egui::Color32::from_rgb(90, 160, 255)));
+                ui.heading(egui::RichText::new("JaCarta Crypto").size(24.0).strong().color(egui::Color32::from_rgb(90, 160, 255)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(if self.show_settings { "✕ Close" } else { "⚙ Settings" }).clicked() {
+                    if ui.button(if self.show_settings { "Close" } else { "Settings" }).clicked() {
                         self.show_settings = !self.show_settings;
                         self.action_status = None;
                     }
@@ -190,7 +216,7 @@ impl JacartaApp {
     fn show_idle_panel(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.label(egui::RichText::new("📂").size(60.0));
+            ui.label(egui::RichText::new("+").size(60.0));
             ui.add_space(20.0);
             ui.label(egui::RichText::new("Drag and drop files here").size(20.0).strong());
             ui.add_space(10.0);
@@ -201,7 +227,7 @@ impl JacartaApp {
     fn show_settings_panel(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.group(|ui| {
-                ui.label(egui::RichText::new("🔑 Token Master Key Initialization").heading());
+                ui.label(egui::RichText::new("Token Master Key Initialization").heading());
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Creates a 256-bit secure key. Required before first encryption.").color(egui::Color32::GRAY));
                 ui.add_space(8.0);
@@ -213,7 +239,7 @@ impl JacartaApp {
                 if ui.button("Create Master Key").clicked() {
                     let token = self.token.as_ref().unwrap();
                     match token.get_or_create_master_key(&self.user_pin) {
-                        Ok(_) => self.action_status = Some((false, "✅ Master Key created successfully!".to_string())),
+                        Ok(_) => self.action_status = Some((false, "Success: Master Key created!".to_string())),
                         Err(e) => self.action_status = Some((true, format!("Token access error: {}", e))),
                     }
                 }
@@ -222,7 +248,7 @@ impl JacartaApp {
             ui.add_space(20.0);
 
             ui.group(|ui| {
-                ui.label(egui::RichText::new("🔄 Change User PIN").heading());
+                ui.label(egui::RichText::new("Change User PIN").heading());
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.label("Current PIN:");
@@ -235,7 +261,7 @@ impl JacartaApp {
                 ui.add_space(8.0);
                 if ui.button("Change PIN").clicked() {
                     match self.token.as_ref().unwrap().change_pin(&self.user_pin, &self.new_user_pin, false) {
-                        Ok(_) => self.action_status = Some((false, "✅ User PIN changed successfully.".to_string())),
+                        Ok(_) => self.action_status = Some((false, "Success: User PIN changed.".to_string())),
                         Err(e) => self.action_status = Some((true, format!("PIN change error: {}", e))),
                     }
                 }
@@ -246,7 +272,7 @@ impl JacartaApp {
     fn show_progress_panel(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.heading("⏳ Operation in progress...");
+            ui.heading("Operation in progress...");
             ui.add_space(20.0);
             
             let progress_bar = egui::ProgressBar::new(self.progress)
@@ -264,7 +290,7 @@ impl JacartaApp {
         
         if let Some((file_name, data)) = &self.preview_data {
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new(format!("👁 {}", file_name)).color(egui::Color32::from_rgb(255, 180, 50)));
+                ui.heading(egui::RichText::new(format!("Preview: {}", file_name)).color(egui::Color32::from_rgb(255, 180, 50)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Close and clear memory").clicked() {
                         close_preview = true;
@@ -323,7 +349,7 @@ impl JacartaApp {
                         ui.label(egui::RichText::new(format!("...and {} more files", self.dropped_files.len() - display_limit)).italics().color(egui::Color32::GRAY));
                         break;
                     }
-                    ui.label(egui::RichText::new(format!("📄 {}", f.file_name().unwrap_or_default().to_string_lossy())).small());
+                    ui.label(egui::RichText::new(format!("- {}", f.file_name().unwrap_or_default().to_string_lossy())).small());
                 }
             });
 
@@ -335,29 +361,29 @@ impl JacartaApp {
         });
 
         ui.add_space(5.0);
-        ui.checkbox(&mut self.delete_originals, "🗑 Delete originals after successful operation");
+        ui.checkbox(&mut self.delete_originals, "Delete originals after successful operation");
 
         ui.add_space(15.0);
 
         ui.horizontal(|ui| {
             if auto_decrypt {
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Decrypt").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 200, 100))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("Decrypt").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 200, 100))).clicked() {
                     self.start_processing(false, false);
                 }
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Encrypt").size(16.0))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("Encrypt").size(16.0))).clicked() {
                     self.start_processing(true, false);
                 }
             } else {
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔒 Encrypt").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 150, 255))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("Encrypt").size(16.0).color(egui::Color32::BLACK)).fill(egui::Color32::from_rgb(100, 150, 255))).clicked() {
                     self.start_processing(true, false);
                 }
-                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("🔓 Decrypt").size(16.0))).clicked() {
+                if ui.add_sized([130.0, 40.0], egui::Button::new(egui::RichText::new("Decrypt").size(16.0))).clicked() {
                     self.start_processing(false, false);
                 }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Cancel").clicked() {
+                if ui.add_sized([100.0, 40.0], egui::Button::new(egui::RichText::new("Cancel").size(16.0))).clicked() {
                     self.dropped_files.clear();
                     self.action_status = None;
                 }
@@ -366,7 +392,7 @@ impl JacartaApp {
         
         if auto_decrypt {
             ui.add_space(5.0);
-            if ui.button(egui::RichText::new("👁 Preview text/code without saving (RAM only)").color(egui::Color32::from_rgb(255, 180, 50))).clicked() {
+            if ui.button(egui::RichText::new("Preview text/code without saving (RAM only)").color(egui::Color32::from_rgb(255, 180, 50))).clicked() {
                 self.start_processing(false, true);
             }
         }
@@ -375,14 +401,17 @@ impl JacartaApp {
     fn start_processing(&mut self, encrypt: bool, preview_only: bool) {
         let token = self.token.as_ref().unwrap();
         let pin = self.user_pin.clone();
-
-        let master_key = match token.get_or_create_master_key(&pin) {
+        
+        let master_key = Zeroizing::new(match token.get_or_create_master_key(&pin) {
             Ok(key) => key,
             Err(e) => {
                 self.action_status = Some((true, format!("Token authorization error: {}", e)));
+                self.user_pin.zeroize();
                 return;
             }
-        };
+        });
+        
+        self.user_pin.zeroize();
 
         let files = self.dropped_files.clone();
         let (tx, rx) = channel();
@@ -431,7 +460,7 @@ impl JacartaApp {
                                     preview_text.push_str("\n\n");
                                 }
                             }
-                            let _ = tx.send(WorkerMessage::PreviewReady("Archive Preview".to_string(), preview_text.into_bytes()));
+                            let _ = tx.send(WorkerMessage::PreviewReady("Archive Preview".to_string(), Zeroizing::new(preview_text.into_bytes())));
                         } else {
                             let _ = tx.send(WorkerMessage::Done(Err("Failed to parse archive in RAM".to_string())));
                         }
@@ -451,60 +480,63 @@ impl JacartaApp {
                 let original_name = first_path.file_name().unwrap().to_string_lossy().into_owned();
                 output_path.set_file_name(format!("{}.crypt", original_name));
 
-                let temp_tar_path = std::env::temp_dir().join(format!("jacarta_{}.tar", std::process::id()));
-                let tar_file = match std::fs::File::create(&temp_tar_path) {
+                let out_file = match std::fs::File::create(&output_path) {
                     Ok(f) => f,
                     Err(e) => {
-                        let _ = tx.send(WorkerMessage::Done(Err(format!("Error creating temp tar: {:?}", e))));
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Error creating output file: {:?}", e))));
                         return;
                     }
                 };
-                let mut builder = tar::Builder::new(tar_file);
 
-                for (i, path) in files.iter().enumerate() {
-                    let _ = tx.send(WorkerMessage::Progress { current: i, total, current_file: format!("Packing {}", path.display()) });
-                    let name = path.file_name().unwrap();
-                    if path.is_dir() {
-                        if let Err(e) = builder.append_dir_all(name, path) {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Error packing dir {}: {:?}", path.display(), e))));
-                            let _ = std::fs::remove_file(&temp_tar_path);
-                            return;
-                        }
-                    } else {
-                        if let Err(e) = builder.append_path_with_name(path, name) {
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Error packing file {}: {:?}", path.display(), e))));
-                            let _ = std::fs::remove_file(&temp_tar_path);
-                            return;
-                        }
+                let mut encrypt_stream = match crate::crypto::EncryptStream::new(out_file, &master_key) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Encryption init error: {:?}", e))));
+                        return;
                     }
-                }
-                
-                if let Err(e) = builder.finish() {
-                    let _ = tx.send(WorkerMessage::Done(Err(format!("Error finalizing tar: {:?}", e))));
-                    let _ = std::fs::remove_file(&temp_tar_path);
-                    return;
-                }
+                };
 
-                let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: "Encrypting archive...".to_string() });
-                match crate::crypto::encrypt_file_with_key(&temp_tar_path, &output_path, &master_key) {
-                    Ok(_) => {
-                        let _ = std::fs::remove_file(&temp_tar_path);
-                        if delete_originals {
-                            for path in &files {
-                                let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: format!("Deleting {}", path.display()) });
-                                if path.is_dir() {
-                                    let _ = std::fs::remove_dir_all(path);
-                                } else {
-                                    let _ = std::fs::remove_file(path);
-                                }
+                {
+                    let mut builder = tar::Builder::new(&mut encrypt_stream);
+                    for (i, path) in files.iter().enumerate() {
+                        let _ = tx.send(WorkerMessage::Progress { current: i, total, current_file: format!("Packing {}", path.display()) });
+                        let name = path.file_name().unwrap();
+                        if path.is_dir() {
+                            if let Err(e) = builder.append_dir_all(name, path) {
+                                let _ = tx.send(WorkerMessage::Done(Err(format!("Error packing dir {}: {:?}", path.display(), e))));
+                                let _ = std::fs::remove_file(&output_path);
+                                return;
+                            }
+                        } else {
+                            if let Err(e) = builder.append_path_with_name(path, name) {
+                                let _ = tx.send(WorkerMessage::Done(Err(format!("Error packing file {}: {:?}", path.display(), e))));
+                                let _ = std::fs::remove_file(&output_path);
+                                return;
                             }
                         }
                     }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&temp_tar_path);
+                    
+                    if let Err(e) = builder.finish() {
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Error finalizing tar: {:?}", e))));
                         let _ = std::fs::remove_file(&output_path);
-                        let _ = tx.send(WorkerMessage::Done(Err(format!("Encryption error: {:?}", e))));
                         return;
+                    }
+                }
+
+                if let Err(e) = encrypt_stream.finish() {
+                    let _ = std::fs::remove_file(&output_path);
+                    let _ = tx.send(WorkerMessage::Done(Err(format!("Encryption finalization error: {:?}", e))));
+                    return;
+                }
+
+                if delete_originals {
+                    for path in &files {
+                        let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: format!("Deleting {}", path.display()) });
+                        if path.is_dir() {
+                            crate::gui::secure_delete_dir(path);
+                        } else {
+                            crate::gui::secure_delete_file(path);
+                        }
                     }
                 }
             } else {
@@ -514,46 +546,72 @@ impl JacartaApp {
                     return;
                 }
 
-                let _ = tx.send(WorkerMessage::Progress { current: 0, total: 1, current_file: "Decrypting archive...".to_string() });
-                let temp_tar_path = std::env::temp_dir().join(format!("jacarta_dec_{}.tar", std::process::id()));
-
-                match crate::crypto::decrypt_file_with_key(input_path, &temp_tar_path, &master_key) {
-                    Ok(_) => {
-                        let _ = tx.send(WorkerMessage::Progress { current: 1, total: 1, current_file: "Unpacking archive...".to_string() });
-                        
-                        let tar_file = match std::fs::File::open(&temp_tar_path) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                let _ = std::fs::remove_file(&temp_tar_path);
-                                let _ = tx.send(WorkerMessage::Done(Err(format!("Error opening temp tar: {:?}", e))));
-                                return;
-                            }
-                        };
-                        
-                        let mut archive = tar::Archive::new(tar_file);
-                        let parent_dir = input_path.parent().unwrap();
-                        
-                        if let Err(e) = archive.unpack(parent_dir) {
-                            let _ = std::fs::remove_file(&temp_tar_path);
-                            let _ = tx.send(WorkerMessage::Done(Err(format!("Error unpacking archive: {:?}", e))));
-                            return;
-                        }
-                        
-                        let _ = std::fs::remove_file(&temp_tar_path);
-                        if delete_originals {
-                            let _ = std::fs::remove_file(input_path);
-                        }
-                    }
+                let _ = tx.send(WorkerMessage::Progress { current: 0, total: 1, current_file: "Decrypting and unpacking...".to_string() });
+                
+                let in_file = match std::fs::File::open(input_path) {
+                    Ok(f) => f,
                     Err(e) => {
-                        let _ = std::fs::remove_file(&temp_tar_path);
-                        let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption error: {:?}", e))));
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Error opening archive: {:?}", e))));
                         return;
                     }
+                };
+
+                let decrypt_stream = match crate::crypto::DecryptStream::new(in_file, &master_key) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(WorkerMessage::Done(Err(format!("Decryption init error: {:?}", e))));
+                        return;
+                    }
+                };
+
+                let mut archive = tar::Archive::new(decrypt_stream);
+                let parent_dir = input_path.parent().unwrap();
+                
+                if let Err(e) = archive.unpack(parent_dir) {
+                    let _ = tx.send(WorkerMessage::Done(Err(format!("Error unpacking archive: {:?}", e))));
+                    return;
+                }
+                
+                if delete_originals {
+                    crate::gui::secure_delete_file(input_path);
                 }
             }
             
             let _ = tx.send(WorkerMessage::Progress { current: total, total, current_file: "Completed".to_string() });
-            let _ = tx.send(WorkerMessage::Done(Ok("✅ Operation completed successfully!".to_string())));
+            let _ = tx.send(WorkerMessage::Done(Ok("Success: Operation completed!".to_string())));
         });
     }
+}
+
+pub fn secure_delete_file(path: &std::path::Path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path) {
+        if let Ok(metadata) = file.metadata() {
+            let size = metadata.len();
+            let chunk = vec![0u8; 65536];
+            let mut written = 0;
+            while written < size {
+                let to_write = std::cmp::min(chunk.len() as u64, size - written);
+                if std::io::Write::write_all(&mut file, &chunk[..to_write as usize]).is_err() {
+                    break;
+                }
+                written += to_write;
+            }
+            let _ = file.sync_all();
+        }
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+pub fn secure_delete_dir(path: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                secure_delete_dir(&p);
+            } else {
+                secure_delete_file(&p);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(path);
 }
