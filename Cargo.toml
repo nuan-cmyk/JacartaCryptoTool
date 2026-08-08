@@ -16,5 +16,7 @@ secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 spki = "0.8.0"
 tar = "0.4"
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Diagnostics_Debug"] }
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Diagnostics_Debug"] }

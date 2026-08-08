@@ -87,12 +87,14 @@ fn setup_custom_styles(ctx: &egui::Context) {
 
 impl eframe::App for JacartaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
         unsafe {
             if windows_sys::Win32::System::Diagnostics::Debug::IsDebuggerPresent() != 0 {
                 std::process::exit(1);
             }
         }
 
+        #[cfg(windows)]
         if !self.security_applied {
             unsafe extern "system" fn enum_window_callback(hwnd: windows_sys::Win32::Foundation::HWND, _lparam: isize) -> i32 {
                 let mut pid = 0;
@@ -109,6 +111,8 @@ impl eframe::App for JacartaApp {
             }
             self.security_applied = true;
         }
+        #[cfg(not(windows))]
+        { self.security_applied = true; }
 
         // Handle background messages
         if let Some(rx) = self.worker_rx.take() {
