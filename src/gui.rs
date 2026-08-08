@@ -26,6 +26,7 @@ pub struct JacartaApp {
     pub current_file: String,
     pub preview_data: Option<(String, Zeroizing<Vec<u8>>)>,
     pub security_applied: bool,
+    _temp_dir: Option<tempfile::TempDir>,
 }
 
 impl JacartaApp {
@@ -43,10 +44,22 @@ impl JacartaApp {
             "jcPKCS11_2_Win32_temp.dll"
         };
 
-        let dll_path = std::env::temp_dir().join(dll_name);
-        let _ = std::fs::write(&dll_path, dll_bytes);
+        let temp_dir = tempfile::Builder::new()
+            .prefix("jacarta_")
+            .tempdir()
+            .ok();
 
-        let token = crate::pki::JacartaToken::new(dll_path.to_str().unwrap()).ok();
+        let token = if let Some(ref dir) = temp_dir {
+            let dll_path = dir.path().join(dll_name);
+            if std::fs::write(&dll_path, dll_bytes).is_ok() {
+                crate::pki::JacartaToken::new(dll_path.to_str().unwrap()).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Self {
             dropped_files: Vec::new(),
             delete_originals: false,
@@ -62,6 +75,7 @@ impl JacartaApp {
             current_file: String::new(),
             preview_data: None,
             security_applied: false,
+            _temp_dir: temp_dir,
         }
     }
 }
@@ -246,6 +260,7 @@ impl JacartaApp {
                         Ok(_) => self.action_status = Some((false, "Success: Master Key created!".to_string())),
                         Err(e) => self.action_status = Some((true, format!("Token access error: {}", e))),
                     }
+                    self.user_pin.zeroize();
                 }
             });
 
@@ -268,6 +283,8 @@ impl JacartaApp {
                         Ok(_) => self.action_status = Some((false, "Success: User PIN changed.".to_string())),
                         Err(e) => self.action_status = Some((true, format!("PIN change error: {}", e))),
                     }
+                    self.user_pin.zeroize();
+                    self.new_user_pin.zeroize();
                 }
             });
         });
@@ -405,7 +422,7 @@ impl JacartaApp {
 
     fn start_processing(&mut self, encrypt: bool, preview_only: bool) {
         let token = self.token.as_ref().unwrap();
-        let pin = self.user_pin.clone();
+        let pin = Zeroizing::new(self.user_pin.clone());
         
         let master_key = Zeroizing::new(match token.get_or_create_master_key(&pin) {
             Ok(key) => key,

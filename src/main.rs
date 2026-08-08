@@ -7,6 +7,13 @@ mod pki;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    #[cfg(windows)]
+    unsafe {
+        if windows_sys::Win32::System::Diagnostics::Debug::IsDebuggerPresent() != 0 {
+            std::process::exit(1);
+        }
+    }
+
     // Write a panic log if the app crashes silently
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("Panic occurred: {}", info);

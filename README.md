@@ -43,3 +43,14 @@ cargo build --release
 
 The compiled binary will be placed in the `target/release/` directory.
 
+## Threat Model and Risk Mitigation
+
+### 1. In-Memory Key Extraction Risk
+Due to hardware limitations of the JaCarta LT token (which does not support AES-GCM operation execution directly on the chip), the 256-bit Master Key must be read from the token (ObjectClass::DATA) into the host's volatile memory (RAM) to perform GCM encryption/decryption on the host CPU.
+* **Mitigation**: To minimize key exposure, keys are wrapped in `zeroize` and `secrecy` memory boundaries, and all volatile buffers are zero-filled immediately after use. However, a compromised host with active kernel-level spyware or memory dump capabilities may still theoretically access the key while a cryptographic operation is running.
+
+### 2. SSD/NVMe Deallocation Limitations
+The "Secure File Shredding" feature writes random data to file blocks before deletion. While this guarantees data destruction on physical HDDs, it does not guarantee sector deallocation on SSDs or NVMe devices due to Flash Translation Layer (FTL) wear-leveling algorithms. 
+* **Mitigation**: Full data sanitization on solid-state drives requires OS-level TRIM commands or full-disk encryption (e.g., BitLocker, LUKS) where deleting the master key effectively renders remaining physical sectors unreadable.
+
+

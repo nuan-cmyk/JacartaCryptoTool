@@ -78,7 +78,7 @@ impl<W: Write + Seek> EncryptStream<W> {
     }
     
     pub fn finish(mut self) -> Result<(), Box<dyn Error>> {
-        self.flush_buffer()?;
+        self.flush_buffer(true)?;
         self.writer.seek(SeekFrom::Start(0))?;
         // Write magic + header body
         let header_body = EncryptedFileHeaderBody {
@@ -91,8 +91,8 @@ impl<W: Write + Seek> EncryptStream<W> {
         Ok(())
     }
     
-    fn flush_buffer(&mut self) -> std::io::Result<()> {
-        if self.buffer.is_empty() {
+    fn flush_buffer(&mut self, is_last: bool) -> std::io::Result<()> {
+        if self.buffer.is_empty() && !is_last {
             return Ok(());
         }
         if self.chunk_index >= 0xFFFF_FFFF {
@@ -107,6 +107,7 @@ impl<W: Write + Seek> EncryptStream<W> {
         let mut aad = Vec::new();
         aad.extend_from_slice(MAGIC_BYTES_V3);
         aad.extend_from_slice(&self.nonce_base);
+        aad.push(if is_last { 1 } else { 0 }); // Authenticate the EOF flag
         let payload = Payload {
             msg: self.buffer.as_ref(),
             aad: &aad,
@@ -130,7 +131,7 @@ impl<W: Write + Seek> Write for EncryptStream<W> {
         while written < buf.len() {
             let space_left = CHUNK_SIZE - self.buffer.len();
             if space_left == 0 {
-                self.flush_buffer()?;
+                self.flush_buffer(false)?;
                 continue;
             }
             
@@ -146,6 +147,12 @@ impl<W: Write + Seek> Write for EncryptStream<W> {
     }
 }
 
+impl<W: Write + Seek> Drop for EncryptStream<W> {
+    fn drop(&mut self) {
+        self.buffer.zeroize();
+    }
+}
+
 pub struct DecryptStream<R: Read> {
     reader: R,
     cipher: Aes256Gcm,
@@ -156,6 +163,7 @@ pub struct DecryptStream<R: Read> {
     buffer: Vec<u8>,
     buffer_pos: usize,
     is_v3: bool,
+    is_last_chunk_reached: bool,
 }
 
 impl<R: Read> DecryptStream<R> {
@@ -164,20 +172,48 @@ impl<R: Read> DecryptStream<R> {
         let mut magic = [0u8; 8];
         reader.read_exact(&mut magic)?;
         
-        if magic != *MAGIC_BYTES_V2 && magic != *MAGIC_BYTES_V3 {
-            return Err("File is not a JaCarta V2/V3 encrypted archive.".into());
+        if magic != *MAGIC_BYTES_V1 && magic != *MAGIC_BYTES_V2 && magic != *MAGIC_BYTES_V3 {
+            return Err("File is not a JaCarta encrypted archive.".into());
         }
+        
+        let key = Key::<Aes256Gcm>::try_from(master_key).map_err(|_| "Invalid key size")?;
+        let cipher = Aes256Gcm::new(&key);
+        
+        if magic == *MAGIC_BYTES_V1 {
+            let mut nonce_bytes = [0u8; 12];
+            reader.read_exact(&mut nonce_bytes)?;
+            
+            let mut ciphertext = Vec::new();
+            reader.read_to_end(&mut ciphertext)?;
+            
+            let nonce = Nonce::from(nonce_bytes);
+            let plaintext = cipher.decrypt(&nonce, ciphertext.as_ref())
+                .map_err(|e| format!("AES V1 Decryption failed: {:?}", e))?;
+                
+            let size = plaintext.len() as u64;
+            return Ok(Self {
+                reader,
+                cipher,
+                nonce_base: [0u8; 12],
+                chunk_index: 0,
+                file_size: size,
+                total_read: size,
+                buffer: plaintext,
+                buffer_pos: 0,
+                is_v3: false,
+                is_last_chunk_reached: true,
+            });
+        }
+
         let is_v3 = magic == *MAGIC_BYTES_V3;
 
         // Deserialize only the body (nonce_base + file_size), NOT the full header with magic
         let header_body: EncryptedFileHeaderBody = bincode::deserialize_from(&mut reader)
             .map_err(|e| format!("Invalid file format: {:?}", e))?;
 
-        let key = Key::<Aes256Gcm>::try_from(master_key).map_err(|_| "Invalid key size")?;
-        
         Ok(Self {
             reader,
-            cipher: Aes256Gcm::new(&key),
+            cipher,
             nonce_base: header_body.nonce_base,
             chunk_index: 0,
             file_size: header_body.file_size,
@@ -185,12 +221,16 @@ impl<R: Read> DecryptStream<R> {
             buffer: Vec::new(),
             buffer_pos: 0,
             is_v3,
+            is_last_chunk_reached: false,
         })
     }
     
     fn read_next_chunk(&mut self) -> std::io::Result<()> {
-        if self.total_read >= self.file_size {
-            return Ok(()); // EOF
+        if !self.is_v3 && self.total_read >= self.file_size {
+            return Ok(()); // Legacy EOF
+        }
+        if self.is_v3 && self.is_last_chunk_reached {
+            return Ok(()); // V3 EOF
         }
         if self.chunk_index >= 0xFFFF_FFFF {
             return Err(std::io::Error::new(
@@ -199,38 +239,105 @@ impl<R: Read> DecryptStream<R> {
             ));
         }
         
-        let remaining = self.file_size - self.total_read;
-        let expected_plaintext_size = std::cmp::min(remaining, CHUNK_SIZE as u64) as usize;
-        let expected_ciphertext_size = expected_plaintext_size + 16;
-        
-        let mut chunk_data = vec![0u8; expected_ciphertext_size];
-        self.reader.read_exact(&mut chunk_data)?;
-        
-        let chunk_nonce_bytes = get_chunk_nonce(&self.nonce_base, self.chunk_index);
-        let nonce = Nonce::from(chunk_nonce_bytes);
-        
-        let mut plaintext = if self.is_v3 {
-            let mut aad = Vec::new();
-            aad.extend_from_slice(MAGIC_BYTES_V3);
-            aad.extend_from_slice(&self.nonce_base);
-            let payload = Payload {
-                msg: chunk_data.as_ref(),
-                aad: &aad,
-            };
-            self.cipher.decrypt(&nonce, payload)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed: {:?}", e)))?
-        } else {
-            self.cipher.decrypt(&nonce, chunk_data.as_ref())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed: {:?}", e)))?
-        };
+        if !self.is_v3 {
+            // Legacy decryption logic (V2)
+            let remaining = self.file_size - self.total_read;
+            let expected_plaintext_size = std::cmp::min(remaining, CHUNK_SIZE as u64) as usize;
+            let expected_ciphertext_size = expected_plaintext_size + 16;
             
-        self.buffer = plaintext.clone();
-        self.buffer_pos = 0;
-        self.total_read += plaintext.len() as u64;
-        self.chunk_index += 1;
-        plaintext.zeroize();
-        
-        Ok(())
+            let mut chunk_data = vec![0u8; expected_ciphertext_size];
+            self.reader.read_exact(&mut chunk_data)?;
+            
+            let chunk_nonce_bytes = get_chunk_nonce(&self.nonce_base, self.chunk_index);
+            let nonce = Nonce::from(chunk_nonce_bytes);
+            
+            let mut plaintext = self.cipher.decrypt(&nonce, chunk_data.as_ref())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed: {:?}", e)))?;
+                
+            self.buffer = plaintext.clone();
+            self.buffer_pos = 0;
+            self.total_read += plaintext.len() as u64;
+            self.chunk_index += 1;
+            plaintext.zeroize();
+            Ok(())
+        } else {
+            // V3 stream decryption logic with truncation protection
+            let mut chunk_data = vec![0u8; CHUNK_SIZE + 16];
+            let mut n = 0;
+            while n < chunk_data.len() {
+                match self.reader.read(&mut chunk_data[n..]) {
+                    Ok(0) => break,
+                    Ok(count) => n += count,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            if n == 0 {
+                if self.is_last_chunk_reached {
+                    return Ok(());
+                } else {
+                    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Missing final chunk marker"));
+                }
+            }
+            if n < 16 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Chunk is too small"));
+            }
+            chunk_data.truncate(n);
+
+            let chunk_nonce_bytes = get_chunk_nonce(&self.nonce_base, self.chunk_index);
+            let nonce = Nonce::from(chunk_nonce_bytes);
+
+            // Determine if this must be the last chunk
+            let must_be_last = n < CHUNK_SIZE + 16;
+            let mut plaintext = None;
+            
+            if !must_be_last {
+                // Try as intermediate chunk first (is_last = false)
+                let mut aad = Vec::new();
+                aad.extend_from_slice(MAGIC_BYTES_V3);
+                aad.extend_from_slice(&self.nonce_base);
+                aad.push(0); // is_last = false
+                
+                let payload = Payload {
+                    msg: &chunk_data,
+                    aad: &aad,
+                };
+                
+                if let Ok(pt) = self.cipher.decrypt(&nonce, payload) {
+                    plaintext = Some(pt);
+                }
+            }
+            
+            let plaintext = match plaintext {
+                Some(pt) => pt,
+                None => {
+                    // Try as final chunk (is_last = true)
+                    let mut aad = Vec::new();
+                    aad.extend_from_slice(MAGIC_BYTES_V3);
+                    aad.extend_from_slice(&self.nonce_base);
+                    aad.push(1); // is_last = true
+                    
+                    let payload = Payload {
+                        msg: &chunk_data,
+                        aad: &aad,
+                    };
+                    
+                    let pt = self.cipher.decrypt(&nonce, payload)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed or chunk was truncated: {:?}", e)))?;
+                    
+                    self.is_last_chunk_reached = true;
+                    pt
+                }
+            };
+
+            self.buffer = plaintext.clone();
+            self.buffer_pos = 0;
+            self.total_read += plaintext.len() as u64;
+            self.chunk_index += 1;
+            let mut pt = plaintext;
+            pt.zeroize();
+            Ok(())
+        }
     }
 }
 
@@ -257,6 +364,13 @@ impl<R: Read> Read for DecryptStream<R> {
         Ok(to_read)
     }
 }
+
+impl<R: Read> Drop for DecryptStream<R> {
+    fn drop(&mut self) {
+        self.buffer.zeroize();
+    }
+}
+
 
 // Wrapper for backward compatibility
 pub fn encrypt_file_with_key(

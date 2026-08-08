@@ -1,6 +1,6 @@
 [package]
 name = "jacarta"
-version = "1.1.4"
+version = "1.1.5"
 edition = "2021"
 
 [dependencies]
@@ -16,6 +16,7 @@ secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 spki = "0.8.0"
 tar = "0.4"
+tempfile = "3"
 zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
 
 [target.'cfg(windows)'.dependencies]
