@@ -18,6 +18,14 @@ pub struct EncryptedFileHeaderV1 {
     pub nonce: [u8; 12],
 }
 
+// Header written after the magic bytes (without magic field itself)
+#[derive(Serialize, Deserialize)]
+pub struct EncryptedFileHeaderBody {
+    pub nonce_base: [u8; 12],
+    pub file_size: u64,
+}
+
+// Legacy struct for backward compat
 #[derive(Serialize, Deserialize)]
 pub struct EncryptedFileHeaderV2 {
     pub magic: [u8; 8],
@@ -50,12 +58,13 @@ impl<W: Write + Seek> EncryptStream<W> {
         let mut nonce_base = [0u8; 12];
         rand::fill(&mut nonce_base);
         
-        let header = EncryptedFileHeaderV2 {
-            magic: *MAGIC_BYTES_V3,
+        // Write magic bytes first, then header body separately
+        let header_body = EncryptedFileHeaderBody {
             nonce_base,
             file_size: u64::MAX, // placeholder
         };
-        let header_bytes = bincode::serialize(&header)?;
+        writer.write_all(MAGIC_BYTES_V3)?;
+        let header_bytes = bincode::serialize(&header_body)?;
         writer.write_all(&header_bytes)?;
         
         Ok(Self {
@@ -71,12 +80,13 @@ impl<W: Write + Seek> EncryptStream<W> {
     pub fn finish(mut self) -> Result<(), Box<dyn Error>> {
         self.flush_buffer()?;
         self.writer.seek(SeekFrom::Start(0))?;
-        let header = EncryptedFileHeaderV2 {
-            magic: *MAGIC_BYTES_V3,
+        // Write magic + header body
+        let header_body = EncryptedFileHeaderBody {
             nonce_base: self.nonce_base,
             file_size: self.total_written,
         };
-        let header_bytes = bincode::serialize(&header)?;
+        self.writer.write_all(MAGIC_BYTES_V3)?;
+        let header_bytes = bincode::serialize(&header_body)?;
         self.writer.write_all(&header_bytes)?;
         Ok(())
     }
@@ -144,28 +154,31 @@ pub struct DecryptStream<R: Read> {
 
 impl<R: Read> DecryptStream<R> {
     pub fn new(mut reader: R, master_key: &[u8]) -> Result<Self, Box<dyn Error>> {
+        // Read magic separately first
         let mut magic = [0u8; 8];
         reader.read_exact(&mut magic)?;
         
         if magic != *MAGIC_BYTES_V2 && magic != *MAGIC_BYTES_V3 {
             return Err("File is not a JaCarta V2/V3 encrypted archive.".into());
         }
+        let is_v3 = magic == *MAGIC_BYTES_V3;
 
-        let header: EncryptedFileHeaderV2 = bincode::deserialize_from(&mut reader)?;
-        // Restore magic byte correctly so we know if it was V2 or V3
-        let actual_magic = magic;
+        // Deserialize only the body (nonce_base + file_size), NOT the full header with magic
+        let header_body: EncryptedFileHeaderBody = bincode::deserialize_from(&mut reader)
+            .map_err(|e| format!("Invalid file format: {:?}", e))?;
+
         let key = Key::<Aes256Gcm>::try_from(master_key).map_err(|_| "Invalid key size")?;
         
         Ok(Self {
             reader,
             cipher: Aes256Gcm::new(&key),
-            nonce_base: header.nonce_base,
+            nonce_base: header_body.nonce_base,
             chunk_index: 0,
-            file_size: header.file_size,
+            file_size: header_body.file_size,
             total_read: 0,
             buffer: Vec::new(),
             buffer_pos: 0,
-            is_v3: actual_magic == *MAGIC_BYTES_V3,
+            is_v3,
         })
     }
     
