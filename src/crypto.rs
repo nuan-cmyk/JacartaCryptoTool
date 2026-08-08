@@ -95,6 +95,12 @@ impl<W: Write + Seek> EncryptStream<W> {
         if self.buffer.is_empty() {
             return Ok(());
         }
+        if self.chunk_index >= 0xFFFF_FFFF {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "AES-GCM chunk limit reached (max 256 TB per file) to prevent counter overflow",
+            ));
+        }
         let chunk_nonce_bytes = get_chunk_nonce(&self.nonce_base, self.chunk_index);
         let nonce = Nonce::from(chunk_nonce_bytes);
         
@@ -185,6 +191,12 @@ impl<R: Read> DecryptStream<R> {
     fn read_next_chunk(&mut self) -> std::io::Result<()> {
         if self.total_read >= self.file_size {
             return Ok(()); // EOF
+        }
+        if self.chunk_index >= 0xFFFF_FFFF {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "AES-GCM chunk limit reached (max 256 TB per file) to prevent counter overflow",
+            ));
         }
         
         let remaining = self.file_size - self.total_read;

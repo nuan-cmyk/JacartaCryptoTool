@@ -8,7 +8,7 @@ JaCarta Crypto Tool is a secure file and directory encryption utility that lever
 * **Stream AEAD Encryption**: Utilizes AES-256-GCM in streaming mode with 64 KB chunks.
 * **Metadata Integrity Protection**: Uses Additional Authenticated Data (AAD) to bind the file headers (magic bytes and nonce base) to the authentication tag of each encrypted chunk, mitigating metadata tampering.
 * **Zero-Disk Tar Streaming**: Packages directories and multiple files into a tar stream in memory and encrypts it on the fly. Plaintext files never touch physical storage during encryption or decryption.
-* **Secure File Shredding**: Implements a multi-pass secure file wiper that overwrites original files with random data before deletion.
+* **Secure File Shredding**: Implements a multi-pass secure file wiper that overwrites original files with random data before deletion. Note: Multi-pass overwriting is fully effective only on mechanical HDDs. On modern SSD/NVMe drives, physical wear-leveling controllers may write replacement blocks to new cells, leaving residual data in retired sectors until TRIM/deallocation is performed.
 * **Anti-Screenshot Mitigation**: Restricts the application window from being captured by screen recorders, capture software, or OS-level screenshot API hooks (using `SetWindowDisplayAffinity`).
 * **Anti-Debugging Shield**: Periodically queries the OS process environment block (`IsDebuggerPresent`) to instantly terminate execution if analysis tools are attached.
 * **In-Memory Secure Preview**: Allows viewing the contents of encrypted files in a secure memory buffer without writing decrypted files to disk.

@@ -365,7 +365,8 @@ impl JacartaApp {
         });
 
         ui.add_space(5.0);
-        ui.checkbox(&mut self.delete_originals, "Delete originals after successful operation");
+        ui.checkbox(&mut self.delete_originals, "Delete originals after successful operation")
+            .on_hover_text("Warning: Multi-pass shredding only guarantees data destruction on mechanical HDDs.\nModern SSDs/NVMe utilize wear-leveling, which write to new cells. Residual data remains on SSDs until TRIM is executed.");
 
         ui.add_space(15.0);
 
