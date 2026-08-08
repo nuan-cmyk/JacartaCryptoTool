@@ -35,6 +35,18 @@ jobs:
             artifact_name: jacarta
             asset_name: jacarta-macos-arm64
 
+          # Linux ARM64 (using native ARM64 runner)
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: jacarta
+            asset_name: jacarta-linux-arm64
+
+          # Windows ARM64 (cross-compiled on Windows x64 runner)
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: jacarta.exe
+            asset_name: jacarta-windows-arm64.exe
+
     runs-on: ${{ matrix.os }}
 
     steps:
