@@ -6,12 +6,40 @@ mod pki;
 
 use eframe::egui;
 
+/// Check if any wgpu GPU adapter is available.
+/// If not, force wgpu to use Microsoft WARP (built-in Windows software renderer).
+/// WARP is always available on Windows 10+ regardless of GPU hardware or drivers.
+fn ensure_gpu_adapter() {
+    use eframe::wgpu::{Backends, Instance, InstanceDescriptor};
+
+    let instance = Instance::new(InstanceDescriptor {
+        backends: Backends::all(),
+        ..Default::default()
+    });
+
+    let any_adapter = instance.enumerate_adapters(Backends::all()).len() > 0;
+
+    if !any_adapter {
+        // No hardware or software adapter found via normal means.
+        // Explicitly tell wgpu to use Microsoft WARP (DX12 software renderer).
+        // WARP ("Microsoft Basic Render Driver") is built into every Windows 10/11 installation.
+        // This works even in VMs, Remote Desktop, and machines with no GPU drivers.
+        unsafe {
+            std::env::set_var("WGPU_BACKEND", "dx12");
+            std::env::set_var("WGPU_ADAPTER_NAME", "Warp");
+        }
+    }
+}
+
 fn main() -> eframe::Result<()> {
     // Write a panic log if the app crashes silently
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("Panic occurred: {}", info);
         let _ = std::fs::write("jacarta_crash.log", msg);
     }));
+
+    // Run GPU adapter pre-flight check BEFORE wgpu initializes
+    ensure_gpu_adapter();
 
     // Get command line arguments (files passed via drag-and-drop on the executable)
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -32,9 +60,8 @@ fn main() -> eframe::Result<()> {
     }
 
     let wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
-        // Try every available backend: DX12 -> DX11 -> Vulkan -> OpenGL
+        // Try every available backend: DX12 -> Vulkan -> OpenGL
         supported_backends: eframe::wgpu::Backends::all(),
-        // If hardware GPU not found, fall back to Microsoft WARP software renderer
         power_preference: eframe::wgpu::PowerPreference::None,
         ..Default::default()
     };
@@ -58,10 +85,9 @@ fn main() -> eframe::Result<()> {
         }),
     );
 
-    // If it fails to start (e.g. graphics driver issues), write to a file
     if let Err(e) = &result {
         let _ = std::fs::write("jacarta_startup_error.log", format!("Startup failed: {:?}", e));
     }
-    
+
     result
 }
