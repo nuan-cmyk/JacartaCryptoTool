@@ -31,16 +31,20 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
+        // Try every available backend: DX12 -> DX11 -> Vulkan -> OpenGL
+        supported_backends: eframe::wgpu::Backends::all(),
+        // If hardware GPU not found, fall back to Microsoft WARP software renderer
+        power_preference: eframe::wgpu::PowerPreference::None,
+        ..Default::default()
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([480.0, 350.0])
             .with_min_inner_size([480.0, 350.0])
             .with_title("JaCarta Crypto Tool"),
-        // Force a specific graphics backend if default fails
-        // wgpu_options: egui_wgpu::WgpuConfiguration {
-        //     backends: egui_wgpu::wgpu::Backends::GL,
-        //     ..Default::default()
-        // },
+        wgpu_options,
         ..Default::default()
     };
 
