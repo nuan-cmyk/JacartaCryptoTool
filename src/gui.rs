@@ -453,10 +453,6 @@ impl JacartaApp {
 
             if preview_only {
                 let input_path = &files[0];
-                let mut temp_name = input_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                if temp_name.ends_with(".crypt") {
-                    temp_name = temp_name[..temp_name.len() - 6].to_string();
-                }
                 
                 match crate::crypto::decrypt_file_to_memory(input_path, &master_key) {
                     Ok(data) => {
@@ -465,22 +461,20 @@ impl JacartaApp {
                         let mut preview_text = String::new();
                         
                         if let Ok(entries) = archive.entries() {
-                            for entry in entries {
-                                if let Ok(mut file) = entry {
-                                    let path = file.path().unwrap().to_string_lossy().into_owned();
-                                    preview_text.push_str(&format!("--- FILE: {} ---\n", path));
-                                    if file.header().entry_type().is_file() {
-                                        let mut content = Vec::new();
-                                        if std::io::Read::read_to_end(&mut file, &mut content).is_ok() {
-                                            if let Ok(s) = std::str::from_utf8(&content) {
-                                                preview_text.push_str(s);
-                                            } else {
-                                                preview_text.push_str("[BINARY DATA]\n");
-                                            }
+                            for mut file in entries.flatten() {
+                                let path = file.path().unwrap().to_string_lossy().into_owned();
+                                preview_text.push_str(&format!("--- FILE: {} ---\n", path));
+                                if file.header().entry_type().is_file() {
+                                    let mut content = Vec::new();
+                                    if std::io::Read::read_to_end(&mut file, &mut content).is_ok() {
+                                        if let Ok(s) = std::str::from_utf8(&content) {
+                                            preview_text.push_str(s);
+                                        } else {
+                                            preview_text.push_str("[BINARY DATA]\n");
                                         }
                                     }
-                                    preview_text.push_str("\n\n");
                                 }
+                                preview_text.push_str("\n\n");
                             }
                             let _ = tx.send(WorkerMessage::PreviewReady("Archive Preview".to_string(), Zeroizing::new(preview_text.into_bytes())));
                         } else {
