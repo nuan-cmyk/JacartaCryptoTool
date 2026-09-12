@@ -12,23 +12,9 @@ const MAGIC_BYTES_V2: &[u8; 8] = b"JACARTA2";
 const MAGIC_BYTES_V3: &[u8; 8] = b"JACARTA3";
 const CHUNK_SIZE: usize = 65536; // 64 KB
 
-#[derive(Serialize, Deserialize)]
-pub struct EncryptedFileHeaderV1 {
-    pub magic: [u8; 8],
-    pub nonce: [u8; 12],
-}
-
 // Header written after the magic bytes (without magic field itself)
 #[derive(Serialize, Deserialize)]
 pub struct EncryptedFileHeaderBody {
-    pub nonce_base: [u8; 12],
-    pub file_size: u64,
-}
-
-// Legacy struct for backward compat
-#[derive(Serialize, Deserialize)]
-pub struct EncryptedFileHeaderV2 {
-    pub magic: [u8; 8],
     pub nonce_base: [u8; 12],
     pub file_size: u64,
 }
@@ -96,8 +82,7 @@ impl<W: Write + Seek> EncryptStream<W> {
             return Ok(());
         }
         if self.chunk_index >= 0xFFFF_FFFF {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 "AES-GCM chunk limit reached (max 256 TB per file) to prevent counter overflow",
             ));
         }
@@ -114,7 +99,7 @@ impl<W: Write + Seek> EncryptStream<W> {
         };
         
         let ciphertext = self.cipher.encrypt(&nonce, payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Error: {:?}", e)))?;
+            .map_err(|e| std::io::Error::other( format!("AES Error: {:?}", e)))?;
         
         self.writer.write_all(&ciphertext)?;
         self.total_written += self.buffer.len() as u64;
@@ -236,8 +221,7 @@ impl<R: Read> DecryptStream<R> {
             return Ok(()); // V3 EOF
         }
         if self.chunk_index >= 0xFFFF_FFFF {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 "AES-GCM chunk limit reached (max 256 TB per file) to prevent counter overflow",
             ));
         }
@@ -255,7 +239,7 @@ impl<R: Read> DecryptStream<R> {
             let nonce = Nonce::from(chunk_nonce_bytes);
             
             let mut plaintext = self.cipher.decrypt(&nonce, chunk_data.as_ref())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed: {:?}", e)))?;
+                .map_err(|e| std::io::Error::other( format!("AES Decryption failed: {:?}", e)))?;
                 
             self.buffer = plaintext.clone();
             self.buffer_pos = 0;
@@ -285,7 +269,7 @@ impl<R: Read> DecryptStream<R> {
             };
             
             let mut plaintext = self.cipher.decrypt(&nonce, payload)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("AES Decryption failed: {:?}", e)))?;
+                .map_err(|e| std::io::Error::other( format!("AES Decryption failed: {:?}", e)))?;
                 
             self.buffer = plaintext.clone();
             self.buffer_pos = 0;
@@ -373,8 +357,7 @@ impl<R: Read> DecryptStream<R> {
                             self.is_legacy_v3 = true;
                             pt
                         } else {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
+                            return Err(std::io::Error::other(
                                 "AES Decryption failed or chunk was truncated: Error"
                             ));
                         }
@@ -423,32 +406,6 @@ impl<R: Read> Drop for DecryptStream<R> {
     }
 }
 
-
-// Wrapper for backward compatibility
-pub fn encrypt_file_with_key(
-    input_path: &Path,
-    output_path: &Path,
-    master_key: &[u8],
-) -> Result<(), Box<dyn Error>> {
-    let mut in_file = fs::File::open(input_path)?;
-    let out_file = fs::File::create(output_path)?;
-    let mut stream = EncryptStream::new(out_file, master_key)?;
-    std::io::copy(&mut in_file, &mut stream)?;
-    stream.finish()?;
-    Ok(())
-}
-
-pub fn decrypt_file_with_key(
-    input_path: &Path,
-    output_path: &Path,
-    master_key: &[u8],
-) -> Result<(), Box<dyn Error>> {
-    let in_file = fs::File::open(input_path)?;
-    let mut out_file = fs::File::create(output_path)?;
-    let mut stream = DecryptStream::new(in_file, master_key)?;
-    std::io::copy(&mut stream, &mut out_file)?;
-    Ok(())
-}
 
 pub fn decrypt_file_to_memory(
     input_path: &Path,
@@ -510,10 +467,9 @@ mod tests {
             encrypted_buffer.write_all(&header_bytes).unwrap();
             
             // Encrypt in chunks
-            let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from_slice(key));
-            let mut chunk_index = 0;
-            for chunk in original_data.chunks(CHUNK_SIZE) {
-                let chunk_nonce_bytes = get_chunk_nonce(&nonce_base, chunk_index);
+            let cipher = Aes256Gcm::new(key.into());
+            for (chunk_index, chunk) in original_data.chunks(CHUNK_SIZE).enumerate() {
+                let chunk_nonce_bytes = get_chunk_nonce(&nonce_base, chunk_index as u64);
                 let nonce = Nonce::from(chunk_nonce_bytes);
                 
                 let mut aad = Vec::new();
@@ -527,7 +483,6 @@ mod tests {
                 };
                 let ciphertext = cipher.encrypt(&nonce, payload).unwrap();
                 encrypted_buffer.write_all(&ciphertext).unwrap();
-                chunk_index += 1;
             }
         }
 
